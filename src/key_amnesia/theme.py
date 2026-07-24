@@ -1,10 +1,10 @@
 """Branded CLI output helpers.
 
-Palette (forged/tempered restraint — one accent per state):
-  teal  #00E5FF  — info / success
-  amber #E0A458  — warn / prompt
-  red   #E85D5D  — hard denials only
-  slate #8B9AAB  — neutrals / non-denial errors
+Palette (brushed chrome, retro-futurist restraint — one accent per state):
+  chrome #AAC8E1  — info / success
+  brass  #C8965A  — warn / prompt
+  red    #D84444  — hard denials only
+  slate  #94A0A8  — neutrals / non-denial errors
 
 Respects NO_COLOR and non-TTY streams: never emits escapes when not a TTY
 (agent parsing / scrubbing safety). Glyphs fall back to ASCII when unicode
@@ -23,24 +23,27 @@ from typing import Any, TextIO
 
 # --- palette -----------------------------------------------------------------
 
-_TEAL = (0, 229, 255)  # #00E5FF
-_AMBER = (224, 164, 88)  # #E0A458
-_RED = (232, 93, 93)  # #E85D5D — hard denials only
-_SLATE = (139, 154, 171)  # #8B9AAB
+_CHROME = (170, 200, 225)  # #AAC8E1 — brushed chrome / polished steel-blue
+_BRASS = (200, 150, 90)  # #C8965A — warm brass, retro-futurist accent
+_RED = (216, 68, 68)  # #D84444 — warning-lamp red, hard denials only
+_SLATE = (148, 160, 168)  # #94A0A8 — gunmetal neutral
 
 # Approximate 256-color indices for the same hues
-_TEAL_256 = 51
-_AMBER_256 = 179
+_CHROME_256 = 152
+_BRASS_256 = 180
 _RED_256 = 167
-_SLATE_256 = 109
+_SLATE_256 = 145
 
 _RESET = "\033[0m"
 _CSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 # Glyphs (unicode) / ASCII fallbacks
-_OK_U, _OK_A = "✓", "[OK]"
-_DENIED_U, _DENIED_A = "✗", "[DENIED]"
+_OK_U, _OK_A = "✅", "[OK]"
+_DENIED_U, _DENIED_A = "❌", "[DENIED]"
 _LOCKED_U, _LOCKED_A = "🔒", "[LOCKED]"
+_UNLOCKED_U, _UNLOCKED_A = "🔓", "[LISTENING]"
+_EXPIRED_U, _EXPIRED_A = "⏳", "[EXPIRED]"
+_CRASHED_U, _CRASHED_A = "💀", "[CRASHED]"
 
 _VT_ENABLED = False
 
@@ -117,7 +120,9 @@ def unicode_enabled(stream: TextIO | None = None) -> bool:
     target = stream if stream is not None else sys.stdout
     encoding = getattr(target, "encoding", None) or "utf-8"
     try:
-        (_OK_U + _DENIED_U + _LOCKED_U).encode(encoding)
+        (
+            _OK_U + _DENIED_U + _LOCKED_U + _UNLOCKED_U + _EXPIRED_U + _CRASHED_U
+        ).encode(encoding)
         return True
     except (LookupError, UnicodeEncodeError):
         return False
@@ -148,6 +153,12 @@ def _glyph(kind: str, stream: TextIO) -> str:
         return _DENIED_U if use_u else _DENIED_A
     if kind == "locked":
         return _LOCKED_U if use_u else _LOCKED_A
+    if kind == "unlocked":
+        return _UNLOCKED_U if use_u else _UNLOCKED_A
+    if kind == "expired":
+        return _EXPIRED_U if use_u else _EXPIRED_A
+    if kind == "crashed":
+        return _CRASHED_U if use_u else _CRASHED_A
     return ""
 
 
@@ -161,6 +172,21 @@ def _is_locked(msg: Any) -> bool:
     return text.lower().startswith("locked")
 
 
+def _is_unlocked(msg: Any) -> bool:
+    text = str(msg).lstrip()
+    return text.lower().startswith("guard listening")
+
+
+def _is_expired(msg: Any) -> bool:
+    text = str(msg).lstrip()
+    return "expired" in text.lower()
+
+
+def _is_crashed(msg: Any) -> bool:
+    text = str(msg).lstrip()
+    return text.lower().startswith("guard crashed")
+
+
 def _is_rule(msg: Any) -> bool:
     text = str(msg)
     return len(text) >= 3 and set(text) <= {"=", "─", "-", "═"}
@@ -171,24 +197,39 @@ def _emit(msg: Any, *, stream: TextIO, style: str | None = None, **kwargs: Any) 
     if style == "success":
         if _is_locked(text):
             g = _glyph("locked", stream)
+        elif _is_unlocked(text):
+            g = _glyph("unlocked", stream)
         else:
             g = _glyph("ok", stream)
         body = f"{g} {text}" if text else g
-        text = _paint(body, _TEAL, _TEAL_256, stream)
+        text = _paint(body, _CHROME, _CHROME_256, stream)
     elif style == "info":
         if _is_rule(text):
             text = _paint(text, _SLATE, _SLATE_256, stream)
         else:
-            text = _paint(text, _TEAL, _TEAL_256, stream)
+            text = _paint(text, _CHROME, _CHROME_256, stream)
     elif style == "warn":
-        text = _paint(text, _AMBER, _AMBER_256, stream)
+        if _is_expired(text):
+            g = _glyph("expired", stream)
+            body = f"{g} {text}" if text else g
+            text = _paint(body, _BRASS, _BRASS_256, stream)
+        else:
+            text = _paint(text, _BRASS, _BRASS_256, stream)
     elif style == "error":
         if _is_denial(text):
             g = _glyph("denied", stream)
             body = f"{g} {text}" if text else g
             text = _paint(body, _RED, _RED_256, stream)
+        elif _is_crashed(text):
+            g = _glyph("crashed", stream)
+            body = f"{g} {text}" if text else g
+            text = _paint(body, _RED, _RED_256, stream)
         else:
             text = _paint(text, _SLATE, _SLATE_256, stream)
+    elif style == "detail":
+        # Secondary/supplementary context — always dimmed, never accent, so
+        # the primary message it's attached to keeps visual priority.
+        text = _paint(text, _SLATE, _SLATE_256, stream)
     elif style == "out":
         # Neutrals — slate only for sparse rule lines; otherwise plain
         if _is_rule(text):
@@ -230,6 +271,13 @@ def error(msg: Any = "", **kwargs: Any) -> None:
 def out(msg: Any = "", **kwargs: Any) -> None:
     stream = kwargs.pop("file", sys.stdout)
     _emit(msg, stream=stream, style="out", **kwargs)
+
+
+def detail(msg: Any = "", **kwargs: Any) -> None:
+    """Secondary/supplementary context (e.g. an auth prompt's detail line):
+    always dimmed slate, never the primary accent color."""
+    stream = kwargs.pop("file", sys.stdout)
+    _emit(msg, stream=stream, style="detail", **kwargs)
 
 
 def err(msg: Any = "", **kwargs: Any) -> None:

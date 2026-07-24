@@ -37,8 +37,13 @@ class PromptRequest:
     command: list[str] = field(default_factory=list)
     # For run: mapping secret_name -> env var name
     inject_as: dict[str, str] = field(default_factory=dict)
-    # Extra context for helper (e.g. reveal target name)
+    # Human-facing context shown at the auth prompt (e.g. reveal target name).
+    # Must NEVER carry secret material — this gets printed to the screen.
     detail: str = ""
+    # Machine payload for the spawned helper to apply a mutation (set/config)
+    # when the parent process can't hold the password itself. May contain a
+    # raw secret value — never printed, only json.loads()'d by the helper.
+    mutation: str = ""
     # Vault path override for helper
     vault_path: str = ""
 
@@ -70,9 +75,9 @@ def _prompt_password_inline(request: PromptRequest, timeout_s: int | None = None
         file=sys.stderr,
     )
     if request.secret_names:
-        theme.info(f"  secrets: {', '.join(request.secret_names)}", file=sys.stderr)
+        theme.detail(f"  secrets: {', '.join(request.secret_names)}", file=sys.stderr)
     if request.detail:
-        theme.info(f"  {request.detail}", file=sys.stderr)
+        theme.detail(f"  {request.detail}", file=sys.stderr)
 
     if timeout_s is None:
         return getpass.getpass("Master password: ")
@@ -400,6 +405,7 @@ def run_prompt_helper() -> int:
         command=list(request_data.get("command") or []),
         inject_as=dict(request_data.get("inject_as") or {}),
         detail=str(request_data.get("detail") or ""),
+        mutation=str(request_data.get("mutation") or ""),
         vault_path=str(request_data.get("vault_path") or ""),
     )
 
@@ -417,6 +423,16 @@ def run_prompt_helper() -> int:
         theme.out(f"Command: {' '.join(request.command)}")
     if request.detail:
         theme.out(request.detail)
+    if request.action in ("set", "config") and request.mutation:
+        # Preview the incoming value in THIS isolated window only — never in
+        # the caller's own terminal (see _prompt_password_inline). The agent
+        # cannot read or type into this console, so showing the value here
+        # lets you deny before it's committed, per README's documented promise.
+        try:
+            mut_preview = json.loads(request.mutation)
+            theme.out(f"Value  : {mut_preview.get('value', '')}")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
     theme.out()
 
     # Watch parent in background
@@ -523,14 +539,16 @@ def run_prompt_helper() -> int:
                     # still need fresh auth — helper will perform mutation
                     # when request carries mutation fields.
                     # For unlock/auth/set/remove/config: password verified;
-                    # helper may apply mutation if detail JSON says so.
+                    # helper may apply mutation if request.mutation JSON says so.
                     reply["ok"] = True
                     reply["reason"] = "authenticated"
-                    # Mutation payloads arrive in request.detail as JSON for
+                    # Mutation payloads arrive in request.mutation as JSON for
                     # set/remove/config when parent cannot hold the password.
-                    if action == "set" and request.detail:
+                    # Never printed — request.detail (already shown above) is
+                    # the human-facing field and must stay secret-free.
+                    if action == "set" and request.mutation:
                         try:
-                            mut = json.loads(request.detail)
+                            mut = json.loads(request.mutation)
                             name = mut["name"]
                             value = mut["value"]
                             secrets_map[name] = value
@@ -568,9 +586,9 @@ def run_prompt_helper() -> int:
                                 },
                             )
                             reply["status_only"] = {"action": "remove", "name": name}
-                    elif action == "config" and request.detail:
+                    elif action == "config" and request.mutation:
                         try:
-                            mut = json.loads(request.detail)
+                            mut = json.loads(request.mutation)
                             from key_amnesia.config import set_config_value
 
                             set_config_value(mut["key"], str(mut["value"]))

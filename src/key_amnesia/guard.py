@@ -43,6 +43,18 @@ AdmitPromptFn = Callable[[int, str], bool]
 # How long the guard's admission prompt waits for a yes/no before denying.
 ADMISSION_TIMEOUT_S = 60.0
 
+# How far ahead of expiry the guard offers to extend the session.
+EXTEND_PROMPT_WINDOW_S = 120.0
+
+# How often the guard nudges an idle terminal with time remaining.
+REMINDER_INTERVAL_S = 300.0
+
+
+def _format_hms(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
 
 @dataclass
 class AdmittedSession:
@@ -434,12 +446,18 @@ def guard_serve(state: GuardState, listener: Any) -> str:
     """
     extend_prompted = False
     reason = "expired"
-    while not state.stop.is_set():
+
+    def _maybe_prompt_extend() -> None:
+        # ~2 min before expiry: prompt extend if TTY still interactive.
+        # Called both at the top of the outer loop and on every accept-poll
+        # tick below — an idle guard (no incoming requests) would otherwise
+        # sit inside the inner accept-wait loop for its whole remaining
+        # lifetime and never reach this check until it was too late.
+        nonlocal extend_prompted
         now = time.time()
-        # ~2 min before expiry: prompt extend if TTY still interactive
         if (
             not extend_prompted
-            and state.expires_at - now <= 120
+            and state.expires_at - now <= EXTEND_PROMPT_WINDOW_S
             and state.expires_at > now
             and sys.stdin.isatty()
         ):
@@ -460,6 +478,34 @@ def guard_serve(state: GuardState, listener: Any) -> str:
                     extend_prompted = False
             except (EOFError, KeyboardInterrupt):
                 pass
+
+    next_reminder_at = state.created_at + REMINDER_INTERVAL_S
+
+    def _maybe_remind_time_left() -> None:
+        # Periodic "still here, here's how long you've got" nudge for an
+        # idle terminal. Same idle-tick placement as _maybe_prompt_extend —
+        # otherwise a guard nobody's talking to would never print one until
+        # it was already inside the extend window (or past it).
+        nonlocal next_reminder_at
+        if not sys.stdout.isatty():
+            return
+        now = time.time()
+        if now < next_reminder_at:
+            return
+        next_reminder_at = now + REMINDER_INTERVAL_S
+        remaining = state.expires_at - now
+        if remaining <= EXTEND_PROMPT_WINDOW_S:
+            return  # the extend prompt already covers this ground
+        expiry_clock = datetime.fromtimestamp(state.expires_at).strftime("%H:%M")
+        theme.detail(
+            f"key-amnesia guard: {_format_hms(remaining)} remaining "
+            f"(expires {expiry_clock})."
+        )
+
+    while not state.stop.is_set():
+        now = time.time()
+        _maybe_prompt_extend()
+        _maybe_remind_time_left()
 
         if now > state.expires_at:
             state.stop.set()
@@ -485,6 +531,8 @@ def guard_serve(state: GuardState, listener: Any) -> str:
             if state.stop.is_set() or time.time() > state.expires_at:
                 break
             t.join(timeout=0.5)
+            _maybe_prompt_extend()
+            _maybe_remind_time_left()
         if not accepted:
             # Timed out waiting / expired / stop
             if state.stop.is_set():
@@ -614,6 +662,11 @@ def run_foreground_guard(payload: dict[str, Any], timeout_minutes: int) -> int:
     theme.success(
         f"Guard listening (pid {pid}, timeout {timeout_minutes}m). "
         "Waiting for requests..."
+    )
+    expiry_clock = datetime.fromtimestamp(expires_at).strftime("%H:%M")
+    theme.detail(
+        f"  expires at {expiry_clock} — Ctrl+C or `ka lock` (another terminal) "
+        f"to stop early. `ka status` shows time left."
     )
 
     reason = "expired"

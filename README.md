@@ -72,7 +72,7 @@ ka unlock                           # start a session
 ka lock                             # end it early, any time
 ```
 
-`ka unlock` runs the guard *in that terminal* — it's the same window for the life of the session. Before it expires, the guard asks right there whether to extend. No answer means it locks itself. The first command any client sends to a live guard also gets a one-time yes/no admission prompt in that same window (`Session (pid ...) wants: ... Admit? [y/N]`) — approve once and the rest of that session's commands go straight through.
+`ka unlock` runs the guard *in that terminal* — it's the same window for the life of the session. The startup line tells you when it expires and how to stop it early (`Ctrl+C` or `ka lock` from another terminal); a periodic nudge repeats that even if the guard sits idle the whole time. Before it expires, the guard asks right there whether to extend. No answer means it locks itself. The first command any client sends to a live guard also gets a one-time yes/no admission prompt in that same window (`Session (pid ...) wants: ... Admit? [y/N]`) — approve once and the rest of that session's commands go straight through.
 
 ## Commands
 
@@ -124,7 +124,7 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 
 ## CLI appearance
 
-On a real terminal, status lines use a restrained brand palette (teal for info/success, amber for warnings, red only for hard denials). Set `NO_COLOR` or redirect output to a pipe/file and all ANSI escapes are omitted — agent-facing and scrubbed paths stay plain text. Glyphs fall back to ASCII (`[OK]` / `[DENIED]` / `[LOCKED]`) when color or unicode is unavailable. Scrubbed command output and raw revealed secret values are never styled.
+On a real terminal, status lines use a restrained brushed-chrome palette (cool chrome-blue for info/success, warm brass for warnings, red only for hard denials, slate for secondary/supporting detail lines like the auth prompt's secrets list). Set `NO_COLOR` or redirect output to a pipe/file and all ANSI escapes are omitted — agent-facing and scrubbed paths stay plain text. Unicode glyphs (✅ ❌ 🔒 🔓 ⏳ 💀) fall back to ASCII (`[OK]` / `[DENIED]` / `[LOCKED]` / `[LISTENING]` / `[EXPIRED]` / `[CRASHED]`) when color or unicode is unavailable. Scrubbed command output and raw revealed secret values are never styled.
 
 ## Development
 
