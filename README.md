@@ -1,5 +1,7 @@
 # key-amnesia
 
+[![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
+
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
 ![key-amnesia — the vault hands the agent a sealed envelope it cannot open](media/assets/approved/readme-hero.png)
@@ -9,6 +11,8 @@ AI coding agents (Claude Code, Cursor, Codex) are incredibly useful — right up
 **key-amnesia is the fourth option.** Your secrets live in an encrypted vault. The agent can *trigger* commands that use them — but the actual values are injected directly into the command's environment, out of the agent's sight. If a command tries to print a secret, key-amnesia censors it before the agent sees the output. And the master password can only ever be typed by you, a real human, at a real keyboard: when an agent needs your approval, a **separate console window pops up on your screen** — one the agent cannot read or type into.
 
 The agent gets amnesia. That's the whole point. And every access attempt — allowed or denied — is written to an audit log you can review.
+
+**The part that matters more than any single integration:** MCP connectors and vendor plugins only ever cover the popular APIs someone bothered to build for. The long tail — a random SaaS's REST API, an internal tool, plain SMTP — is never coming. With key-amnesia, your agent can write itself a script against *any* API that takes a key, run it through `ka run`, and you don't have to be afraid anything leaks. Not "we integrated with X" — a general-purpose unlock for the APIs no one will ever get around to wrapping.
 
 ## How it works, in 30 seconds
 
@@ -121,6 +125,7 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 6. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has, and even that requires one admission prompt to be approved on your own screen first.
 7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
 8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
+9. **A live guard session can serve a stale secret.** The guard decrypts the vault once, at `ka unlock` time, and holds that snapshot in memory for its whole session — it does not notice a `ka set`/`ka remove` made against the vault file while it's already running. `ka run`/`ka list` against a live guard will keep returning the pre-update value until you cycle the session (`ka lock` then `ka unlock`). Not a leak — the guard never hands out anything it wasn't already holding — but a real staleness gap worth knowing about if you rotate a secret mid-session.
 
 ## CLI appearance
 
