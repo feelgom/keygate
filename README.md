@@ -1,6 +1,7 @@
 # key-amnesia
 
 [![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/key-amnesia.svg)](https://pypi.org/project/key-amnesia/)
 
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
@@ -38,10 +39,10 @@ When the agent triggers step 3 and your approval is needed, you'll see a new con
 ## Install
 
 ```bash
-pip install git+https://github.com/fujitoid/key-amnesia
+pip install key-amnesia
 ```
 
-Or from a local clone: `pip install .` — either way you get both the full `key-amnesia` command and the short `ka` alias.
+Or from source: `pip install git+https://github.com/fujitoid/key-amnesia`, or from a local clone: `pip install .` — every path gets you both the full `key-amnesia` command and the short `ka` alias.
 
 > Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
 

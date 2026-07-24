@@ -28,6 +28,17 @@ from key_amnesia.vault import (
 )
 
 
+def _write_command_output(stream: Any, text: str) -> None:
+    """Relay a command's (already-scrubbed) output without crashing on a
+    console codepage that can't represent one of its characters — the same
+    degrade-don't-crash rule theme.py already applies to its own output."""
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="key-amnesia",
@@ -344,8 +355,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             timeout=3600,
         )
         if resp and resp.get("ok"):
-            sys.stdout.write(resp.get("scrubbed_stdout", ""))
-            sys.stderr.write(resp.get("scrubbed_stderr", ""))
+            _write_command_output(sys.stdout, resp.get("scrubbed_stdout", ""))
+            _write_command_output(sys.stderr, resp.get("scrubbed_stderr", ""))
             return int(resp.get("exit_code", 0))
         if resp and resp.get("expired"):
             theme.warn("Guard session expired; falling back to per-call auth.")
@@ -399,14 +410,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             route=outcome.route,
             result="allowed",
         )
-        sys.stdout.write(result.scrubbed_stdout)
-        sys.stderr.write(result.scrubbed_stderr)
+        _write_command_output(sys.stdout, result.scrubbed_stdout)
+        _write_command_output(sys.stderr, result.scrubbed_stderr)
         return result.exit_code
 
     # Helper already executed.
     if outcome.run_result:
-        sys.stdout.write(outcome.run_result.get("scrubbed_stdout", ""))
-        sys.stderr.write(outcome.run_result.get("scrubbed_stderr", ""))
+        _write_command_output(sys.stdout, outcome.run_result.get("scrubbed_stdout", ""))
+        _write_command_output(sys.stderr, outcome.run_result.get("scrubbed_stderr", ""))
         return int(outcome.run_result.get("exit_code") or 0)
     theme.error(f"Denied: {outcome.reason or 'run failed'}")
     return 1
