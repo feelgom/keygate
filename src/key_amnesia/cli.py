@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -217,10 +218,12 @@ def cmd_set(args: argparse.Namespace) -> int:
         )
         return 1
     # Prefer not putting secret values on argv — if omitted, prompt (inline only)
+    # `mutation` (not `detail`!) carries the value — detail is human-facing
+    # and printed at the auth prompt, mutation never is.
     request = PromptRequest(
         action="set",
         secret_names=[name],
-        detail=json.dumps({"name": name, "value": value}) if value is not None else "",
+        mutation=json.dumps({"name": name, "value": value}) if value is not None else "",
     )
     # If value missing and interactive, collect value after password inline.
     ok, password, outcome = _auth_password(request)
@@ -444,7 +447,7 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
     timeout_min = int(cfg.get("session-timeout-minutes", 30))
     request = PromptRequest(
         action="unlock",
-        detail=json.dumps({"session-timeout-minutes": timeout_min}),
+        detail=f"session timeout: {timeout_min} minutes",
         vault_path=str(vault_path()),
     )
     ok, password, outcome = _auth_password(request)
@@ -576,7 +579,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     if args.config_command == "set":
         request = PromptRequest(
             action="config",
-            detail=json.dumps({"key": args.key, "value": args.value}),
+            detail=f"config key: {args.key}",
+            mutation=json.dumps({"key": args.key, "value": args.value}),
         )
         ok, password, outcome = _auth_password(request)
         if not ok:
@@ -613,6 +617,18 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 2
 
 
+def _format_remaining(expires_at_epoch: Any) -> str | None:
+    """Human-readable countdown to a guard's expiry, or None if unknown/past."""
+    try:
+        remaining = float(expires_at_epoch) - time.time()
+    except (TypeError, ValueError):
+        return None
+    if remaining <= 0:
+        return "expiring now"
+    minutes, seconds = divmod(int(remaining), 60)
+    return f"{minutes}m {seconds}s"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     from key_amnesia.guard import (
         format_no_guard_message,
@@ -633,6 +649,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
     if resp and resp.get("ok"):
         theme.out(f"pid: {resp.get('pid')}")
         theme.out(f"expires_at: {resp.get('expires_at')}")
+        remaining = _format_remaining(resp.get("expires_at_epoch"))
+        if remaining:
+            theme.out(f"remaining: {remaining}")
         theme.out(f"secret_count: {resp.get('secret_count')}")
         theme.out(f"admitted: {'yes' if resp.get('admitted') else 'no'}")
         if resp.get("admitted_since"):
@@ -641,6 +660,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
     else:
         theme.out(f"pid: {lock.get('pid')}")
         theme.out(f"expires_at: {lock.get('expires_at')}")
+        remaining = _format_remaining(lock.get("expires_at_epoch"))
+        if remaining:
+            theme.out(f"remaining: {remaining}")
     return 0
 
 
