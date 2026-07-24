@@ -10,10 +10,31 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [{ name = "key-amnesia contributors" }]
+keywords = ["secrets", "credentials", "vault", "ai-agents", "claude", "cursor", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Utilities",
+]
 dependencies = [
     "pynacl>=1.5",
     "pyperclip>=1.8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/fujitoid/key-amnesia"
+Repository = "https://github.com/fujitoid/key-amnesia"
+Issues = "https://github.com/fujitoid/key-amnesia/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

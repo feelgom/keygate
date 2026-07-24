@@ -1,3 +1,0 @@
-media/assets/approved/*.jpg filter=lfs diff=lfs merge=lfs -text
-media/assets/approved/*.jpeg filter=lfs diff=lfs merge=lfs -text
-media/assets/approved/*.png filter=lfs diff=lfs merge=lfs -text
