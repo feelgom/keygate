@@ -2,6 +2,7 @@
 
 [![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/key-amnesia.svg)](https://pypi.org/project/key-amnesia/)
+[![Discord](https://img.shields.io/discord/1531406398334832690?label=discord&logo=discord)](https://discord.gg/4WnQfk49xX)
 
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
@@ -131,6 +132,10 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 ## CLI appearance
 
 On a real terminal, status lines use a restrained brushed-chrome palette (cool chrome-blue for info/success, warm brass for warnings, red only for hard denials, slate for secondary/supporting detail lines like the auth prompt's secrets list). Set `NO_COLOR` or redirect output to a pipe/file and all ANSI escapes are omitted — agent-facing and scrubbed paths stay plain text. Unicode glyphs (✅ ❌ 🔒 🔓 ⏳ 💀) fall back to ASCII (`[OK]` / `[DENIED]` / `[LOCKED]` / `[LISTENING]` / `[EXPIRED]` / `[CRASHED]`) when color or unicode is unavailable. Scrubbed command output and raw revealed secret values are never styled.
+
+## Community
+
+Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX) or [GitHub issues](https://github.com/fujitoid/key-amnesia/issues).
 
 ## Development
 
