@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <style>
+      .bg { fill: #F7F1E5; }
+      .teal { fill: #6E9184; }
+      .char { fill: #1E2A2D; }
+      .accent { fill: #E58A61; }
+      .mono {
+        font-family: "DejaVu Sans Mono", "Courier New", monospace;
+        font-size: 106px;
+        letter-spacing: 10px;
+        fill: #1E2A2D;
+      }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1024" height="1024"/>
+
+  <!-- outer vault / terminal frame -->
+  <rect x="224" y="210" width="576" height="470" rx="58" class="teal" stroke="#1E2A2D" stroke-width="10"/>
+
+  <!-- inner panel -->
+  <rect x="286" y="270" width="448" height="350" rx="34" fill="#F7F1E5" stroke="#1E2A2D" stroke-width="8"/>
+
+  <!-- hinges -->
+  <rect x="256" y="316" width="34" height="74" rx="8" class="teal" stroke="#1E2A2D" stroke-width="8"/>
+  <rect x="256" y="488" width="34" height="74" rx="8" class="teal" stroke="#1E2A2D" stroke-width="8"/>
+
+  <!-- terminal prompt > -->
+  <path d="M396 382 L520 446 L396 510" stroke="#1E2A2D" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- handle / cursor -->
+  <rect x="610" y="430" width="142" height="42" rx="18" class="accent" stroke="#1E2A2D" stroke-width="8"/>
+
+  <!-- wordmark.
+       textLength pins the rendered width so the mark is identical on machines
+       that lack DejaVu Sans Mono and fall back to a wider monospace face —
+       without it the string overflows the canvas in most browsers. -->
+  <text x="512" y="820" text-anchor="middle" class="mono"
+        textLength="672" lengthAdjust="spacingAndGlyphs">key-amnesia</text>
+</svg>

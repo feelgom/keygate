@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/fujitoid/key-amnesia/master/media/assets/approved/logo-512.png" alt="key-amnesia" width="200">
+</p>
+
 # key-amnesia
 
 [![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
@@ -6,7 +10,10 @@
 
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
-![key-amnesia — the vault hands the agent a sealed envelope it cannot open](media/assets/approved/readme-hero.png)
+<!-- Absolute URL, not a repo-relative path: PyPI renders this README outside the
+     repository and cannot resolve relative image paths, so a relative link shows
+     as a broken image on the project page. -->
+![key-amnesia — the vault hands the agent a sealed envelope it cannot open](https://raw.githubusercontent.com/fujitoid/key-amnesia/master/media/assets/approved/readme-hero.png)
 
 AI coding agents (Claude Code, Cursor, Codex) are incredibly useful — right up until they need an API key. Then your choices are ugly: paste the key into the chat (now it lives in the conversation forever), put it in a plain-text `.env` file the agent can read, or just do that part yourself.
 
