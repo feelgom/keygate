@@ -77,6 +77,10 @@ class GuardState:
     stop: threading.Event = field(default_factory=threading.Event)
     admitted: AdmittedSession | None = None
     request_count: int = 0
+    # One stdin reader per guard run (see _StdinPump) — every prompt this
+    # guard shows (admission, extend) must share the same reader, or two
+    # concurrent input() calls race for the same typed line.
+    stdin_pump: "_StdinPump" = field(default_factory=lambda: _StdinPump())
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -231,12 +235,99 @@ def _summarize_request(verb: str, msg: dict[str, Any]) -> str:
     return f"'{verb or 'unknown'}' request"
 
 
-def default_admit_prompt(caller_pid: int, summary: str) -> bool:
+class _StdinPump:
+    """Coordinates prompts so at most one thread is ever blocked in input().
+
+    Every prompt used to spawn its own thread around a blocking input()
+    call, bounded by joining that thread with a timeout. But a thread that
+    times out is never killed — Python cannot cancel a blocking input() —
+    so it keeps running, still blocked in input(), forever. If a second
+    prompt then spawned its own thread while the first was still alive,
+    both threads were blocked on the same stdin at once: whichever the OS
+    handed the next typed line to "won", and it was not necessarily the one
+    whose prompt was currently on screen. That let an explicit "y" typed in
+    answer to a visible prompt be silently swallowed by an abandoned thread
+    from an earlier, already-timed-out prompt — the visible prompt then
+    timed out too and reported denied, despite the correct answer having
+    been typed.
+
+    This coordinator starts at most one input()-reading thread at a time,
+    and that thread reads exactly one line then stops — it does not loop,
+    so a fast/non-blocking input() (real piped stdin, or a test double)
+    cannot spin it into a busy loop. read_line() either starts that one
+    read (if none is in flight) or waits on the read already in flight, so
+    concurrent callers see the same next typed line instead of racing for
+    it. An answer that arrives when nobody is waiting is discarded the next
+    time read_line() is called rather than handed to an unrelated later
+    prompt — a stale "y" for one question must not silently approve a
+    different one.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._pending = False  # a reader thread is currently blocked in input()
+        self._result: str | None = None
+        self._have_result = False
+        self._eof = False
+
+    def _read(self) -> None:
+        try:
+            line = input()
+        except BaseException:
+            line = None
+            hit_eof = True
+        else:
+            hit_eof = False
+        with self._cond:
+            self._pending = False
+            if hit_eof:
+                self._eof = True
+            else:
+                self._result = line
+                self._have_result = True
+            self._cond.notify_all()
+
+    def read_line(self, timeout: float | None = None) -> str | None:
+        """Wait up to `timeout` seconds for the next line (block until EOF if None)."""
+        with self._cond:
+            # An unclaimed answer from an earlier read nobody was still
+            # waiting for belongs to a different question — drop it rather
+            # than silently hand it to this new one.
+            if self._have_result and not self._pending:
+                self._have_result = False
+                self._result = None
+
+            if self._eof and not self._pending:
+                return None
+
+            if not self._pending and not self._have_result:
+                self._pending = True
+                threading.Thread(target=self._read, daemon=True).start()
+
+            deadline = None if timeout is None else time.time() + timeout
+            while not self._have_result:
+                if self._eof and not self._pending:
+                    return None
+                if deadline is None:
+                    self._cond.wait()
+                    continue
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return None
+                self._cond.wait(timeout=remaining)
+
+            self._have_result = False
+            line, self._result = self._result, None
+            return line
+
+
+def default_admit_prompt(caller_pid: int, summary: str, stdin_pump: _StdinPump) -> bool:
     """Blocking yes/no prompt on the guard's own foreground TTY.
 
-    Bounded by ADMISSION_TIMEOUT_S on a daemon thread — same fail-closed
-    pattern as the inline prompts in prompt_route.py: deny on timeout, EOF,
-    or any non-yes answer.
+    Reads via the guard run's shared `stdin_pump` rather than its own
+    input() thread — see `_StdinPump` for why a per-call thread is the wrong
+    shape here; every prompt in one guard run must share the same reader.
+    Bounded by ADMISSION_TIMEOUT_S; deny on timeout or any non-yes answer.
     """
     try:
         theme.out(
@@ -246,20 +337,10 @@ def default_admit_prompt(caller_pid: int, summary: str) -> bool:
     except Exception:
         pass
 
-    outcome: dict[str, Any] = {}
-
-    def _read() -> None:
-        try:
-            outcome["ans"] = input().strip().lower()
-        except BaseException as exc:  # noqa: BLE001 — relayed via outcome
-            outcome["error"] = exc
-
-    t = threading.Thread(target=_read, daemon=True)
-    t.start()
-    t.join(timeout=ADMISSION_TIMEOUT_S)
-    if t.is_alive() or "error" in outcome:
+    line = stdin_pump.read_line(ADMISSION_TIMEOUT_S)
+    if line is None:
         return False
-    return outcome.get("ans") in ("y", "yes")
+    return line.strip().lower() in ("y", "yes")
 
 
 def _check_admission(
@@ -283,9 +364,11 @@ def _check_admission(
         state.admitted.last_summary = _summarize_request(verb, msg)
         return True, None
 
-    prompt = admit_prompt or default_admit_prompt
     summary = _summarize_request(verb, msg)
-    approved = bool(prompt(caller_pid, summary))
+    if admit_prompt is not None:
+        approved = bool(admit_prompt(caller_pid, summary))
+    else:
+        approved = bool(default_admit_prompt(caller_pid, summary, state.stdin_pump))
     if not approved:
         return False, None
 
@@ -468,7 +551,8 @@ def guard_serve(state: GuardState, listener: Any) -> str:
                     f"{int(state.expires_at - now)}s. Extend? [y/N] ",
                     end="",
                 )
-                ans = input().strip().lower()
+                line = state.stdin_pump.read_line()
+                ans = (line or "").strip().lower()
                 if ans in ("y", "yes"):
                     # Default extend by original remaining window or 30m
                     state.expires_at = time.time() + 30 * 60
