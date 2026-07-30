@@ -85,7 +85,7 @@ ka unlock                           # start a session
 ka lock                             # end it early, any time
 ```
 
-`ka unlock` runs the guard *in that terminal* — it's the same window for the life of the session. The startup line tells you when it expires and how to stop it early (`Ctrl+C` or `ka lock` from another terminal); a periodic nudge repeats that even if the guard sits idle the whole time. Before it expires, the guard asks right there whether to extend. No answer means it locks itself. The first command any client sends to a live guard also gets a one-time yes/no admission prompt in that same window (`Session (pid ...) wants: ... Admit? [y/N]`) — approve once and the rest of that session's commands go straight through.
+`ka unlock` runs the guard *in that terminal* — it's the same window for the life of the session. The startup line tells you when it expires and how to stop it early (`Ctrl+C` or `ka lock` from another terminal); a periodic nudge repeats that even if the guard sits idle the whole time. Before it expires, the guard asks right there whether to extend. No answer means it locks itself. The first command from an unrecognized process reaching a live guard also gets a one-time yes/no admission prompt in that same window (`Session (pid ...) wants: ... Admit? [y/N]`) — approve once and a real child process of that same command tree goes straight through afterward; a genuinely separate process (even from the same shell) triggers its own prompt. If you know you're about to run a batch of agent commands from a fresh process each time, `ka unlock --pre-admit` loudly auto-admits just the *next* one, for a bounded window, without a prompt.
 
 ## Commands
 
@@ -97,11 +97,12 @@ ka lock                             # end it early, any time
 | `ka remove NAME` | Delete a secret (password required) |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
-| `ka unlock` / `ka lock` | Start / end a cached session |
+| `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start a cached session; `--pre-admit` loudly auto-admits the very next connecting process for a bounded window (15m default), without a yes/no prompt — scope it to specific secrets with `--pre-admit-secret`, repeatable, or leave it off for ALL secrets |
+| `ka lock` | End a cached session early |
 | `ka reveal NAME` | Show a value to *you* (password required every time, even mid-session) |
 | `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
 | `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
-| `ka status` | Is a session active, and until when — plus, if not, what happened to the last one |
+| `ka status` (alias `ka connect`) | Is a session active, and until when — plus, if not, what happened to the last one |
 | `ka setup` | Install agent skills + the secret-guard hook for Claude Code / Cursor (`--skills-only` / `--hook-only`) |
 
 Every command supports `--help`.
@@ -117,7 +118,7 @@ For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 - **The guard never hands out secrets.** In cached mode, the guard *itself* runs your command with the secret injected and returns only the censored output and exit code. Its protocol simply has no "give me the value" request — so even another process connecting to it directly can't ask for one. Guard verbs stay exactly `run` / `list` / `lock` / `status` / `renew`.
 - **Nothing sensitive on command lines.** Windows records process command lines in its audit logs (event 4688); key-amnesia passes all sensitive hand-off data between its own processes via environment variables instead.
 - **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout.
-- **Admission consent:** the first command any client sends to a live guard triggers a one-time yes/no prompt in the guard's own terminal window; approve once and it's remembered (an opaque token, not a password) for the rest of that session. This sits on top of — never replaces — the hard guarantee above.
+- **Admission consent, bound to real process identity:** the first command from an unrecognized process reaching a live guard triggers a one-time yes/no prompt in the guard's own terminal window. Approval is tied to that connecting process's **kernel-verified identity** (its actual OS pid + creation time, confirmed by the operating system itself — not anything the client claims) — a real child process of an already-approved one is recognized automatically; a separate, unrelated process gets its own prompt. There is no on-disk admission credential to steal. This sits on top of — never replaces — the hard guarantee above.
 - **Honest death reporting:** `ka lock` / `ka status` tell you what actually happened to the last session (`locked`, `expired`, `interrupted`, or `crashed: <reason>`) instead of a bare "no active session."
 
 Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
@@ -134,7 +135,8 @@ No tool in this class can promise absolute secrecy, and we'd rather tell you exa
 6. **Same-user processes share your privileges.** Any program running under your OS account can talk to a live guard session (this is equally true of `ssh-agent`). That's why the guard is designed to never return raw values — the worst a rogue same-user process gets is the same bounded "run a command" capability the legitimate path has, and even that requires one admission prompt to be approved on your own screen first.
 7. **The master password never crosses any inter-process channel**, in any form — it's consumed only inside the process that prompted you for it.
 8. **Avoid `ka set NAME VALUE` with the value inline.** It's supported for scripting, but an inline value briefly appears on the calling process's command line — visible to same-user process inspection and Windows command-line auditing. Prefer plain `ka set NAME` and type the value at the hidden prompt. (If an agent tries the inline form, the approval window shows you the incoming value before asking for your password — so you can still deny it.)
-9. **A live guard session reloads on change, not on a fixed schedule.** The guard checks a cheap content fingerprint (size + mtime + hash) of the vault file on every `run`/`list`/`status`; when a `ka set`/`ka remove` from another terminal changes it, the guard re-opens the vault with the SecretBox key it already derived at `ka unlock` time — no new password prompt, no Argon2id re-run — and replaces its in-memory secrets before answering. This closes the previous staleness gap (a live guard used to hold a fixed snapshot for its whole session). The tradeoff: the guard now keeps that **derived key** in memory for the life of the session, not just the plaintext secrets it already held — see DESIGN.md. A rotate mid-session is picked up on the very next `run`/`list`/`status`, no lock/unlock cycle required.
+9. **`--pre-admit` is an explicit, opt-in trust-widening you ask for.** It auto-admits whichever process happens to connect first within the window — not necessarily the one you meant — so only use it right before the command you're expecting, for a short window, and treat the loud confirmation line + audit log entry as the evidence of what it actually admitted.
+10. **A live guard session reloads on change, not on a fixed schedule.** The guard checks a cheap content fingerprint (size + mtime + hash) of the vault file on every `run`/`list`/`status`; when a `ka set`/`ka remove` from another terminal changes it, the guard re-opens the vault with the SecretBox key it already derived at `ka unlock` time — no new password prompt, no Argon2id re-run — and replaces its in-memory secrets before answering. This closes the previous staleness gap (a live guard used to hold a fixed snapshot for its whole session). The tradeoff: the guard now keeps that **derived key** in memory for the life of the session, not just the plaintext secrets it already held — see DESIGN.md. A rotate mid-session is picked up on the very next `run`/`list`/`status`, no lock/unlock cycle required.
 
 ## CLI appearance
 

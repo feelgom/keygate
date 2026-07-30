@@ -15,20 +15,28 @@ from key_amnesia.guard import (
     GuardState,
     clear_guard_lock,
     guard_handle_message,
-    write_admission_token,
     write_guard_lock,
 )
+from key_amnesia.peer_identity import PeerIdentity
 from key_amnesia.prompt_route import AuthOutcome, PromptRequest, require_human_auth
 from key_amnesia.run_exec import run_with_secrets
 from key_amnesia.vault import load_vault
 
-ADMITTED_TOKEN = "test-admitted-token"
+# A fixed stand-in identity for tests that don't go through a real IPC
+# connection (see `_admit`) — never a bearer credential like the old
+# on-disk admission token, just a `GuardState.admitted` seed.
+TEST_PEER = PeerIdentity(pid=999999, start_time=1)
 
 
 def _admit(state: GuardState) -> GuardState:
     """Pre-seed an admitted session so these tests exercise verb dispatch,
     not the (separately tested) admission-consent prompt."""
-    state.admitted = AdmittedSession(token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00")
+    state.admitted = AdmittedSession(
+        identities=[TEST_PEER],
+        first_seen="2026-01-01T00:00:00+00:00",
+        unscoped=True,
+        granted_until=state.expires_at,
+    )
     return state
 
 
@@ -83,9 +91,9 @@ def test_guard_run_path_scrubs(seeded_vault: Path, password: str) -> None:
             "secret_names": ["api_key", "db_pass"],
             "inject_as": {"api_key": "API_KEY", "db_pass": "DB"},
             "command": [sys.executable, "-c", code],
-            "admission_token": ADMITTED_TOKEN,
         },
         state,
+        peer=TEST_PEER,
     )
     assert reply["ok"] is True
     assert "super-secret-value-123" not in reply["scrubbed_stdout"]
@@ -105,25 +113,27 @@ def test_unlock_run_lock_fallback(
     secrets = {k: str(v) for k, v in payload["secrets"].items()}
 
     listener, address, authkey = ipc.start_listener()
-    state = _admit(
-        GuardState(
-            secrets=secrets,
-            expires_at=time.time() + 600,
-            address=address,
-            authkey=authkey,
-            pid=0,
-        )
+    state = GuardState(
+        secrets=secrets,
+        expires_at=time.time() + 600,
+        address=address,
+        authkey=authkey,
+        pid=0,
     )
     write_guard_lock(address, authkey, 0, state.expires_at)
-    # Client-side cached token so guard_request (used by cmd_run/cmd_lock)
-    # attaches it automatically and skips the admission-consent prompt —
-    # same file the real CLI would have written after a real admission.
-    write_admission_token(ADMITTED_TOKEN)
+    # No client-side credential to pre-seed anymore (0.3.8): the guard
+    # identifies the caller straight from the kernel (see `peer_identity`)
+    # on each accepted connection below, exactly like the real guard_serve.
+    # This test process is both client and server, so every connection's
+    # kernel-verified peer is this same process — admit it once via
+    # `admit_prompt=True` and subsequent connections are silently in-tree.
 
     # Make guard_is_alive True without needing a real PID check
     monkeypatch.setattr(guard_mod, "guard_is_alive", lambda *a, **k: True)
 
     import threading
+
+    from key_amnesia import peer_identity
 
     stop = threading.Event()
 
@@ -135,7 +145,10 @@ def test_unlock_run_lock_fallback(
                 break
             try:
                 msg = ipc.recv_msg(conn, timeout=5)
-                reply = guard_handle_message(msg, state)
+                peer = peer_identity.get_peer_identity(conn)
+                reply = guard_handle_message(
+                    msg, state, peer=peer, admit_prompt=lambda *a, **k: True
+                )
                 ipc.send_msg(conn, reply)
                 if reply.get("lock"):
                     stop.set()

@@ -12,6 +12,7 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.7 (bugfix, no CLI-surface / no IPC-verb changes):** fixed the guard's stale in-memory secrets snapshot (README limit 9 / "Known limitation" below). `GuardState` gained `vault_path`, `vault_key` (derived SecretBox key only — never the password), and `vault_content_fingerprint`; `run`/`list`/`status` now call `_maybe_reload_secrets`, which re-opens the vault with the retained key (no Argon2id) whenever the fingerprint changes. `cmd_unlock` switched from `load_vault` to `load_vault_with_key` to obtain that key without deriving it twice; `vault.py` gained `load_vault_with_key`, `load_vault_with_retained_key`, and `vault_fingerprint`. Verb set is unchanged — still exactly `{run, list, lock, status, renew}`; no `reload` verb was added (`tests/test_guard_verbs_regression.py` untouched). New exposure: the guard now retains **derived key material** for the session (see "Who holds plaintext" and the note under GuardState below) — same trust tier as the plaintext secrets it already held, but worth naming explicitly. `tests/test_guard_reload.py`.
 
+**0.3.8 (admission model replaced; no IPC-verb changes; no new verb):** the admission-consent layer no longer trusts a message-supplied `caller_pid` or an opaque bearer token — it binds to the connecting process's **kernel-verified identity** instead (new `peer_identity.py`: `GetNamedPipeClientProcessId` + `OpenProcess`/`GetProcessTimes` on Windows, `SO_PEERCRED` + `/proc/<pid>/stat` on Linux; macOS/other fails closed). `admitted_session.token` is **gone** — there is no on-disk admission credential anymore; `guard_request` attaches nothing beyond an optional display-only `client_name`. Admission now also supports **secret-scoped grants** (a `run` naming a secret outside the admitted tree's current grant re-prompts to expand scope, rather than either a blanket allow or a blanket re-prompt-everything) and an opt-in, single-use, loud **`ka unlock --pre-admit [--pre-admit-secret NAME ...]`** (default window `pre-admit-seconds`, config default 900s / 15m) that auto-admits the very next unrecognized peer without a prompt — unscoped (ALL secrets) if no `--pre-admit-secret` is given. New `ka connect` is a plain CLI alias for `ka status` (same handler, no separate guard verb — still exactly `{run, list, lock, status, renew}`, `tests/test_guard_verbs_regression.py` untouched). New optional `--name LABEL` on every guard-talking command sets `KEY_AMNESIA_CLIENT_NAME` so the admission prompt can show a human-friendly label — display-only, never a trust input. See "Admission consent — kernel-verified peer identity" below for the full model, `peer_identity.py`, `test_guard_admission.py`, `test_guard_admission_legacy.py` (in-memory-only backward-compat path for callers that predate kernel identity), and `test_peer_identity_e2e.py` (real spawned-process security tests).
 **Out of scope:** macOS (and Safari); browser integration of any kind (removed, not deferred — see above); passkeys / TOTP; MCP wrapper; GUI; macOS isolated-console spawn (`Terminal.app` / `osascript`); DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
 
 ---
@@ -41,6 +42,7 @@ key-amnesia/
     ipc.py                         # Listener/Client + authkey only
     prompt_route.py                # isatty + CREATE_NEW_CONSOLE; env handoff
     guard.py                       # foreground singleton; admission consent; death reporting
+    peer_identity.py               # kernel-verified peer (pid, start_time); no message-supplied pid trusted
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
     theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
@@ -94,7 +96,7 @@ Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia
 
 ### Config (`config.json`)
 
-`session-mode` (default `per-call`), `session-timeout-minutes` (30), `prompt-timeout-seconds` (90).
+`session-mode` (default `per-call`), `session-timeout-minutes` (30), `prompt-timeout-seconds` (90), `pre-admit-seconds` (900 — default window for `ka unlock --pre-admit`, since 0.3.8).
 
 ### Guard lock (`guard.lock`)
 
@@ -102,9 +104,9 @@ Whole-vault AEAD cannot list names without the password. Sidecar `~/.key-amnesia
 
 **No `session_key_hex`.** Authkey authentication alone defines the IPC trust boundary. An extra SecretBox layer over messages was dropped: with a session key co-stored in `guard.lock` next to the authkey, the same processes that can read the authkey can read the session key — zero added protection, pure complexity.
 
-### Admission token (`admitted_session.token`)
+### No admission credential on disk (since 0.3.8)
 
-Opaque `secrets.token_urlsafe(32)` string minted by the guard the first time it admits a client (see "Admission consent" below), cached on disk by the *client* side (`guard_request`) so subsequent CLI invocations in the same shell skip the prompt. Not a security boundary by itself (same-user readable, same trust tier as `guard.lock`) — it is a **UX/consent** layer on top of the authkey boundary, not a replacement for it. Cleared by the guard on `lock` / any teardown; a stale token from a previous guard run is simply unrecognized and re-prompts (harmless).
+Pre-0.3.8, admission minted an opaque `secrets.token_urlsafe(32)` string (`admitted_session.token`) cached on disk by the client (`guard_request`) so later invocations in the same shell skipped the prompt. That file is **gone**: admission since 0.3.8 binds to the connecting process's kernel-verified `(pid, start_time)` identity instead (see "Admission consent — kernel-verified peer identity" below) — there is nothing admission-related to steal, read, or leave stale on disk. The in-memory opaque-token check (`AdmittedSession.token`, `_check_admission_legacy`) still exists in `guard.py` purely so `guard_handle_message` stays callable unmodified by test/call sites that predate kernel identity and never pass a `peer` kwarg; `guard_serve` — the only production dispatch path — always supplies a real `peer`, so that legacy branch never runs against a live guard.
 
 ### Last guard state (`last_guard_state.json`)
 
@@ -112,7 +114,7 @@ Written by the guard on **every** exit path — `started_at`, `ended_at`, `reaso
 
 ### Audit (`audit.log` JSONL)
 
-`timestamp`, `action`, `secret_names`, `command`, `route` (`inline`|`spawned-console`|`guard-session`), `result` (`allowed`|`denied`|`timeout`), `reason`. Never secret values, never passwords.
+`timestamp`, `action`, `secret_names`, `command`, `route` (`inline`|`spawned-console`|`guard-session`), `result` (`allowed`|`denied`|`timeout`|`warn`), `reason`. Never secret values, never passwords. `warn` (0.3.8) is a detection-only event that isn't itself an allow/deny outcome — an unrecognized peer showing up at the guard, or a `--pre-admit` window being armed — written unconditionally, independent of how the prompt is eventually answered.
 
 ---
 
@@ -185,17 +187,33 @@ Command output is **not live** — the agent sees it only after the command exit
 
 A second terminal's `ka unlock` still sees the live lock and soft-warns without starting a second guard (same singleton behavior as v2) — the singleton check is unchanged; only the guard's own execution model (foreground vs. detached-child) changed.
 
-### Admission consent — a UX/consent layer above the authkey boundary
+### Admission consent — kernel-verified peer identity (0.3.8)
 
-The guard's authkey remains the hard security boundary (same-user processes that know the authkey can talk to the guard — the ssh-agent-style limit, unchanged from v2). On top of that, v3 adds a lightweight **consent** layer: the first request from any client is gated by a yes/no prompt printed on the **guard's own foreground TTY** —
+The guard's authkey remains the hard security boundary (same-user processes that know the authkey can talk to the guard — the ssh-agent-style limit, unchanged since v2). On top of that, a lightweight **consent** layer gates the first request from any unrecognized process *tree*: a yes/no prompt printed on the **guard's own foreground TTY** —
 
 ```
-Session (pid {caller_pid}) wants: {short_summary}. Admit? [y/N]
+Session ({client_name} (pid {pid}, verified)) wants: {short_summary}. Admit? [y/N]
 ```
 
-— bounded by a 60s `threading.Thread` + `join` (same fail-closed pattern as the inline password prompt); timeout or any non-yes answer denies. On yes, the guard mints an opaque `secrets.token_urlsafe(32)` token, remembers it in-memory (`GuardState.admitted`), and returns it in the reply; the CLI's `guard_request` wrapper (used by every guard-talking command) persists it to `admitted_session.token` automatically. Once admitted, that token skips the prompt for the rest of *this* guard's lifetime — no re-prompting per command. A stale token from a previous guard run is simply unrecognized (re-prompts once, harmless).
+— bounded by a 60s `threading.Thread` + `join` (same fail-closed pattern as the inline password prompt); timeout or any non-yes answer denies. `{client_name}` is present only if the caller passed `--name LABEL` (display-only — see below); "verified" appears whenever the peer's identity came from a real kernel lookup, which is always true on the only two supported platforms.
 
-`ka status` reports admission state (`admitted: yes/no`, `admitted_since`, `request_count`). The guard also logs one non-secret line per handled request on its own TTY (verb + allowed/denied) — a live activity feed for whoever is sitting at that terminal.
+**What changed from the pre-0.3.8 model:** admission used to trust a message-supplied `caller_pid` for display and mint an opaque bearer token (`admitted_session.token`, cached on disk by the client) as the actual re-admission credential — any process that could read that file, or that simply claimed a `caller_pid`, got the same trust as the originally-admitted client. Since 0.3.8, `peer_identity.py` asks the **kernel**, not the message, who is on the other end of the IPC connection:
+
+- **Windows:** `GetNamedPipeClientProcessId` on the accepted pipe handle gets the connecting pid; `OpenProcess` + `GetProcessTimes` on that pid immediately afterward gets its creation timestamp. The `(pid, start_time)` pair is `PeerIdentity` — pairing with a creation timestamp defeats PID-recycling (a *different* process that later reuses the same pid has a different start time and is never confused with the original).
+- **Linux:** `SO_PEERCRED` on the accepted socket gets the connecting pid (and uid/gid, unused); `/proc/<pid>/stat` gets its start-time-in-clock-ticks (field 22) for the same `PeerIdentity` pairing.
+- **macOS / other platforms:** no kernel-level peer lookup is implemented — `get_peer_identity` returns `None`, and `_check_admission` treats `peer=None` as **fail closed**, never as "no peer info supplied" (that's a distinct sentinel, `_PEER_UNSET`, reserved for pre-kernel-identity callers — see below). An unrecognized-platform guard simply cannot admit any client.
+
+Approval binds admission to that peer's `PeerIdentity`, not a token: `GuardState.admitted` (`AdmittedSession.identities`) remembers it, and later connections are recognized either by an exact match or by walking the **new** connection's OS ancestor chain (`peer_identity.get_ancestor_chain`, bounded to `MAX_ANCESTOR_DEPTH` hops) looking for an admitted identity — a genuine OS *descendant* of the admitted process (e.g. a child shell it spawned) is silently in-tree, while a merely-sibling process (even the next separate CLI invocation from the same login shell) is treated as a fresh, unrecognized peer and re-prompts. This is a deliberate trade-off for a bearer-credential-free design (see `is_in_admitted_tree`) — `--pre-admit` exists to smooth over a bounded window of expected repeat activity from otherwise-unrelated processes.
+
+**Secret-scoped grants.** `AdmittedSession.granted_secrets` / `unscoped` track *which* secrets a `run` request has actually been approved for, not just whether the tree is admitted at all: a `run` naming a secret outside the current grant re-prompts to expand scope (`"scope expanded"` in the audit trail) rather than either silently allowing it or re-prompting for verbs that never asked for it. `unscoped=True` (only ever set by `--pre-admit` with no `--pre-admit-secret`, or an interactively-approved request with no secret names) grants every secret with no further prompting.
+
+**Opt-in, single-use `--pre-admit`.** `ka unlock --pre-admit [--pre-admit-secret NAME ...]` arms a bounded window (`GuardState.pre_admit_until`, default `pre-admit-seconds` = 900s / 15m from config) during which the very next unrecognized peer is admitted with **no prompt at all** — scoped to the named secrets, or unscoped ALL secrets if none given. This is loud by design: printed immediately to the guard's own TTY plus a distinct `pre-admit-armed` audit event when armed, and a normal `admission` audit event (`via=pre-admit`) the moment it's actually consumed. Single-use — consumed by the first peer to connect, whether or not the window's remaining time has elapsed, and cleared either way.
+
+**Legacy in-memory-only fallback (`_PEER_UNSET`).** `guard_handle_message(msg, state, *, peer=_PEER_UNSET, admit_prompt=None)` defaults `peer` to a sentinel distinct from `None`: `_PEER_UNSET` means "caller doesn't know about kernel peer identity at all" and routes to `_check_admission_legacy`, the exact pre-0.3.8 opaque-token-in-message check — kept alive only so hand-built test/call sites that predate 0.3.8 keep working unmodified. `guard_serve` (the only production dispatch path) always supplies a real `peer` from `peer_identity.get_peer_identity`, so the legacy branch never executes against a live guard.
+
+`ka status` (and its plain alias `ka connect` — same handler, no separate guard verb) reports admission state: `admitted: yes/no`, `admitted_since`, `admitted_pids`, `granted_secrets`, `granted_until`, `request_count`, plus `pre_admit_pending` / `pre_admit_scope` / `pre_admit_until` while a pre-admit window is armed but not yet consumed. The guard also logs one non-secret line per handled request on its own TTY (verb + allowed/denied) — a live activity feed for whoever is sitting at that terminal.
+
+**`--name LABEL` (display-only, never a trust input).** Any guard-talking command accepts `--name LABEL`, threaded through as the `KEY_AMNESIA_CLIENT_NAME` environment variable and attached to the outgoing message as `client_name`; the admission prompt shows it alongside the kernel-verified pid so a human approving the request has more context than a bare number. It carries zero trust weight — admission decisions never consult it, only kernel-verified `PeerIdentity`.
 
 ### Honest death reporting
 
@@ -244,7 +262,7 @@ Guard IPC has **no** `get-value`/`reveal` verb. Same-user processes can talk to 
 
 `multiprocessing.connection` on `\\.\pipe\key-amnesia-<random>` + `authkey` only. Messages are ordinary pickled/JSON objects over the authenticated connection — **no additional payload SecretBox**.
 
-Guard verbs: `run`, `list`, `lock`, `status`, `renew` only. Every message additionally carries `caller_pid` (for the admission prompt's display text only — not a trust mechanism) and, once admitted, an `admission_token`.
+Guard verbs: `run`, `list`, `lock`, `status`, `renew` only — still exactly five since v1; `ka connect` is a plain CLI alias for `status`, not a sixth verb. Since 0.3.8, messages carry nothing admission-related at all: no `caller_pid`, no `admission_token`. The guard identifies the caller straight from the kernel at the IPC layer (see "Admission consent — kernel-verified peer identity" above); the only client-supplied, display-only addition is an optional `client_name` (from `--name` / `KEY_AMNESIA_CLIENT_NAME`).
 
 Master password never appears on this channel in any form. Master password is never satisfiable non-interactively without a spawned console.
 
@@ -270,11 +288,12 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `set` / `remove` — fresh auth; mutate vault + names index; `set` refuses if no vault exists yet rather than creating one implicitly
 - `run --secret/--as ... -- cmd` — guard hit or per-call decrypt path; buffer-then-scrub child stdout/stderr → `***REDACTED(name)***`
 - `list` — read names sidecar (no prompt); never values
-- `unlock` — *is* the guard; blocks in the caller's own terminal until locked/expired/interrupted
+- `unlock [--pre-admit] [--pre-admit-secret NAME ...]` — *is* the guard; blocks in the caller's own terminal until locked/expired/interrupted; `--pre-admit` loudly arms a single-use, bounded-window auto-admit for the next unrecognized peer (see "Admission consent" above)
 - `lock` — tear down the live guard session (or report the last one's honest fate if none is live)
 - `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
-- `config set session-mode|session-timeout-minutes` — always fresh auth
-- `status` — live guard status (pid, expiry, secret count, admission state) or the last session's honest death report
+- `config set session-mode|session-timeout-minutes|prompt-timeout-seconds|pre-admit-seconds` — always fresh auth
+- `status` (alias `connect`, same handler, no separate guard verb) — live guard status (pid, expiry, secret count, admission state, pre-admit-pending state) or the last session's honest death report
+- `run`/`list`/`lock`/`status`/`connect` accept `--name LABEL` — display-only client label shown in the guard's admission prompt (see "Admission consent" above); never a trust input
 - `setup` — non-interactive: copies the 3 packaged skills to `~/.claude/skills/` + `~/.cursor/skills/` and idempotently merges the secret-guard hook into `~/.claude/settings.json` (`PreToolUse`) + `~/.cursor/hooks.json` (`preToolUse`); `--skills-only` / `--hook-only` to do just one half; never mutates vault/session state
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 
@@ -302,13 +321,35 @@ def run_with_secrets(command: list[str], env_inject: dict[str, str],
 def scrub_text(text: str, secrets: dict[str, str]) -> str: ...
 # exact str.replace for every value; no regex
 
-def guard_handle_message(msg: dict, state: GuardState, *, admit_prompt=None) -> dict: ...
+def guard_handle_message(msg: dict, state: GuardState, *,
+                         peer: "PeerIdentity | None | object" = _PEER_UNSET,
+                         admit_prompt=None) -> dict: ...
+# `peer` is the connection's kernel-verified identity (see peer_identity.py);
+# guard_serve always supplies a real one. The _PEER_UNSET default routes to
+# the pre-0.3.8 in-memory opaque-token check for callers that predate
+# kernel identity; an explicit `peer=None` (a real lookup that failed)
+# always fails closed instead.
 def run_foreground_guard(payload: dict, timeout_minutes: int, *,
-                         vault_path=None, vault_key: bytes | None = None) -> int: ...
+                         vault_path=None, vault_key: bytes | None = None,
+                         pre_admit: bool = False,
+                         pre_admit_secrets: list[str] | None = None,
+                         pre_admit_seconds: int = 900) -> int: ...
 # vault_path/vault_key are optional and both-or-nothing in practice; when
 # given, the guard retains vault_key (derived key only) and reloads
 # state.secrets on a vault content change — see "Known limitation" above.
+# pre_admit arms a single-use, bounded-window auto-admit for the next
+# unrecognized peer — see "Admission consent" above.
 def format_no_guard_message() -> str: ...
+
+# peer_identity.py — kernel-verified peer identity, no message-supplied pid trusted
+def get_peer_identity(conn: Connection) -> "PeerIdentity | None": ...
+# None on lookup failure or an unsupported platform (macOS/other) — always
+# fail-closed, never a silent "trust it anyway".
+def get_ancestor_chain(pid: int, max_depth: int = 32) -> list["PeerIdentity"]: ...
+# [pid's own identity, parent's, grandparent's, ...], best-effort, bounded.
+def is_in_admitted_tree(admitted: list["PeerIdentity"], peer: "PeerIdentity") -> bool: ...
+# True if peer exactly matches one of `admitted`, or is a real OS descendant
+# of one (walks peer's own ancestor chain looking for an admitted match).
 ```
 
 ---
@@ -321,4 +362,4 @@ The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, ex
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); admission-consent prompt approves/denies/times out, known token skips re-prompt, stale token from a different guard re-prompts, round-trips through `guard_request` end to end, `status` reports admission state (`test_guard_admission.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising, automatically covers `setup` (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`); secret-guard hook blocks every known prefix (OpenAI/Anthropic/AWS/GitHub/GitLab/Slack/Google/Stripe/npm) and high-entropy assignments, allows placeholder assignments (`PASSWORD=test123`), bare mentions, comments, and `ka run`/`ka set` command lines, host detection (Claude vs Cursor payload shape) picks the right deny contract, disable env skips everything, fails open on malformed/empty/non-dict stdin (`test_secret_guard.py`); `ka setup` copies all three skills to both hosts with matching content, overwrites stale copies on rerun, `--skills-only`/`--hook-only` isolate each half, Claude `settings.json` / Cursor `hooks.json` merges preserve unrelated keys and other hooks and are idempotent on rerun, malformed settings recover to a fresh merge, PATH check reports found/not-found via monkeypatched `shutil.which` (`test_setup_cmd.py`); a real wheel build (`pip wheel`) contains all three packaged `SKILL.md` files and the hook module (`test_package_skills_data.py`); the extend-prompt and idle-time reminder both fire on an idle guard parked inside a never-returning `listener.accept()` — not just when a client happens to connect — and an accepted extend actually pushes `expires_at` out (`test_guard_extend_prompt.py`); the startup banner shows the expiry clock and how to stop early, and the periodic reminder backs off once inside the extend window (`test_guard_startup_banner.py`); `ka set`'s value never appears in the caller's own terminal, is reachable only via `PromptRequest.mutation` and not `detail`, and the isolated spawned-console helper still previews it before applying the mutation (`test_set_never_prints_value.py`); guard reload picks up a `set` made while unlocked on the very next `run`/`list`/`status`, a `remove` makes a secret disappear the same way, reload is driven by the vault's content fingerprint (not a fixed poll interval or a new verb), and the guard never returns a raw secret value across a reload (`test_guard_reload.py`).
+Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); kernel-verified-peer admission-consent prompt approves/denies/times out, an unavailable peer identity (`peer=None`) always fails closed rather than falling back to the legacy path, an admitted peer skips re-prompting, a real OS descendant of an admitted peer is silently in-tree while an unrelated peer is not and re-prompts, secret-scoped grants allow already-granted secrets without re-prompting and re-prompt (allow or deny) to expand scope for a new one, unscoped grants never re-prompt, `--pre-admit` consumes its single-use window for the next unrecognized peer (unscoped or scoped to specific secrets) and falls back to a normal prompt once expired, `status` reports admission state and pending pre-admit (`test_guard_admission.py`); the pre-0.3.8 in-memory opaque-token fallback path (`_PEER_UNSET`, no `peer` kwarg supplied) still approves/denies/re-prompts exactly as before, purely for callers that predate kernel identity (`test_guard_admission_legacy.py`); real spawned-process E2E security tests — an unrelated spawned process is never silently admitted, a genuine child process of an admitted process is silently in-tree without a prompt (`test_peer_identity_e2e.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising, automatically covers `setup` (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`); secret-guard hook blocks every known prefix (OpenAI/Anthropic/AWS/GitHub/GitLab/Slack/Google/Stripe/npm) and high-entropy assignments, allows placeholder assignments (`PASSWORD=test123`), bare mentions, comments, and `ka run`/`ka set` command lines, host detection (Claude vs Cursor payload shape) picks the right deny contract, disable env skips everything, fails open on malformed/empty/non-dict stdin (`test_secret_guard.py`); `ka setup` copies all three skills to both hosts with matching content, overwrites stale copies on rerun, `--skills-only`/`--hook-only` isolate each half, Claude `settings.json` / Cursor `hooks.json` merges preserve unrelated keys and other hooks and are idempotent on rerun, malformed settings recover to a fresh merge, PATH check reports found/not-found via monkeypatched `shutil.which` (`test_setup_cmd.py`); a real wheel build (`pip wheel`) contains all three packaged `SKILL.md` files and the hook module (`test_package_skills_data.py`); the extend-prompt and idle-time reminder both fire on an idle guard parked inside a never-returning `listener.accept()` — not just when a client happens to connect — and an accepted extend actually pushes `expires_at` out (`test_guard_extend_prompt.py`); the startup banner shows the expiry clock and how to stop early, and the periodic reminder backs off once inside the extend window (`test_guard_startup_banner.py`); `ka set`'s value never appears in the caller's own terminal, is reachable only via `PromptRequest.mutation` and not `detail`, and the isolated spawned-console helper still previews it before applying the mutation (`test_set_never_prints_value.py`); guard reload picks up a `set` made while unlocked on the very next `run`/`list`/`status`, a `remove` makes a secret disappear the same way, reload is driven by the vault's content fingerprint (not a fixed poll interval or a new verb), and the guard never returns a raw secret value across a reload (`test_guard_reload.py`).

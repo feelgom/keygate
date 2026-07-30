@@ -48,11 +48,6 @@ def guard_lock_path() -> Path:
     return data_dir() / "guard.lock"
 
 
-def admitted_session_token_path() -> Path:
-    """Opaque admission token minted by a live guard for the current session."""
-    return data_dir() / "admitted_session.token"
-
-
 def last_guard_state_path() -> Path:
     """Honest-death-reporting record written by the guard on every teardown."""
     return data_dir() / "last_guard_state.json"

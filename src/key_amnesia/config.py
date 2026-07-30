@@ -12,6 +12,9 @@ DEFAULTS: dict[str, Any] = {
     "session-mode": "per-call",
     "session-timeout-minutes": 30,
     "prompt-timeout-seconds": 90,
+    # Default window for `ka unlock --pre-admit` (no `--pre-admit-seconds`
+    # flag exists; this is the only knob) — see guard.run_foreground_guard.
+    "pre-admit-seconds": 900,
 }
 
 VALID_SESSION_MODES = frozenset({"per-call", "cached"})
@@ -65,10 +68,19 @@ def set_config_value(key: str, value: str, path: Path | None = None) -> dict[str
         if seconds < 1:
             raise ConfigError("prompt-timeout-seconds must be >= 1")
         cfg[key] = seconds
+    elif key == "pre-admit-seconds":
+        try:
+            seconds = int(value)
+        except ValueError as e:
+            raise ConfigError("pre-admit-seconds must be an integer") from e
+        if seconds < 1:
+            raise ConfigError("pre-admit-seconds must be >= 1")
+        cfg[key] = seconds
     else:
         raise ConfigError(
             f"Unknown config key {key!r}; "
-            "supported: session-mode, session-timeout-minutes, prompt-timeout-seconds"
+            "supported: session-mode, session-timeout-minutes, "
+            "prompt-timeout-seconds, pre-admit-seconds"
         )
     save_config(cfg, path)
     return cfg

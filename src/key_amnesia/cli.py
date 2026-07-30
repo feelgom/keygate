@@ -102,13 +102,49 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help="Command to run (use -- before command)",
     )
+    p_run.add_argument(
+        "--name",
+        default=None,
+        metavar="LABEL",
+        help="Display-only client label shown in the guard's admission prompt",
+    )
 
     # list
-    sub.add_parser("list", help="List secret names (no prompt; names sidecar)")
+    p_list = sub.add_parser("list", help="List secret names (no prompt; names sidecar)")
+    p_list.add_argument(
+        "--name",
+        default=None,
+        metavar="LABEL",
+        help="Display-only client label shown in the guard's admission prompt",
+    )
 
     # unlock / lock
-    sub.add_parser("unlock", help="Start cached guard session (requires password)")
-    sub.add_parser("lock", help="Tear down cached guard session")
+    p_unlock = sub.add_parser("unlock", help="Start cached guard session (requires password)")
+    p_unlock.add_argument(
+        "--pre-admit",
+        action="store_true",
+        help=(
+            "Loudly pre-admit the very next client for a bounded window "
+            "(default from config pre-admit-seconds) — no prompt for it"
+        ),
+    )
+    p_unlock.add_argument(
+        "--pre-admit-secret",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Scope --pre-admit to this secret (repeatable); omit for an "
+            "unscoped ALL-secrets pre-admit"
+        ),
+    )
+    p_lock = sub.add_parser("lock", help="Tear down cached guard session")
+    p_lock.add_argument(
+        "--name",
+        default=None,
+        metavar="LABEL",
+        help="Display-only client label shown in the guard's admission prompt",
+    )
 
     # reveal / copy
     p_rev = sub.add_parser("reveal", help="Reveal a secret (always fresh auth)")
@@ -125,12 +161,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_cfg_set.add_argument(
         "key",
-        choices=["session-mode", "session-timeout-minutes", "prompt-timeout-seconds"],
+        choices=[
+            "session-mode",
+            "session-timeout-minutes",
+            "prompt-timeout-seconds",
+            "pre-admit-seconds",
+        ],
     )
     p_cfg_set.add_argument("value")
 
-    # status
-    sub.add_parser("status", help="Show guard session status")
+    # status (connect is a plain alias — same handler, no separate verb)
+    p_status = sub.add_parser("status", help="Show guard session status")
+    p_status.add_argument(
+        "--name",
+        default=None,
+        metavar="LABEL",
+        help="Display-only client label shown in the guard's admission prompt",
+    )
+    p_connect = sub.add_parser(
+        "connect",
+        help="Alias for 'status' (no separate guard verb — same status check)",
+    )
+    p_connect.add_argument(
+        "--name",
+        default=None,
+        metavar="LABEL",
+        help="Display-only client label shown in the guard's admission prompt",
+    )
 
     # setup (agent distribution: skills + PreToolUse/preToolUse hook)
     p_setup = sub.add_parser(
@@ -441,7 +498,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_unlock(_args: argparse.Namespace) -> int:
+def cmd_unlock(args: argparse.Namespace) -> int:
     """`ka unlock` *is* the guard: it decrypts, then blocks in this terminal.
 
     No detached child process, no bootstrap-env handoff. A non-interactive
@@ -457,9 +514,16 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
 
     cfg = load_config()
     timeout_min = int(cfg.get("session-timeout-minutes", 30))
+    pre_admit = bool(getattr(args, "pre_admit", False))
+    pre_admit_secrets = list(getattr(args, "pre_admit_secret", None) or [])
+    pre_admit_seconds = int(cfg.get("pre-admit-seconds", 900))
+    detail = f"session timeout: {timeout_min} minutes"
+    if pre_admit:
+        scope = ", ".join(pre_admit_secrets) if pre_admit_secrets else "ALL secrets"
+        detail += f"; --pre-admit armed for {scope} ({pre_admit_seconds}s window)"
     request = PromptRequest(
         action="unlock",
-        detail=f"session timeout: {timeout_min} minutes",
+        detail=detail,
         vault_path=str(vault_path()),
     )
     ok, password, outcome = _auth_password(request)
@@ -481,7 +545,13 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
         # reload the vault on a content change without a fresh Argon2id run
         # or a second password prompt — see guard._maybe_reload_secrets.
         return run_foreground_guard(
-            payload, timeout_min, vault_path=vault_path(), vault_key=vkey
+            payload,
+            timeout_min,
+            vault_path=vault_path(),
+            vault_key=vkey,
+            pre_admit=pre_admit,
+            pre_admit_secrets=pre_admit_secrets,
+            pre_admit_seconds=pre_admit_seconds,
         )
 
     theme.error(f"Denied: {outcome.reason or 'unlock failed'}")
@@ -490,7 +560,6 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
 
 def cmd_lock(_args: argparse.Namespace) -> int:
     from key_amnesia.guard import (
-        clear_admission_token,
         clear_guard_lock,
         format_no_guard_message,
         guard_is_alive,
@@ -499,12 +568,10 @@ def cmd_lock(_args: argparse.Namespace) -> int:
 
     if not guard_is_alive():
         clear_guard_lock()
-        clear_admission_token()
         theme.info(format_no_guard_message())
         return 0
     resp = guard_request({"verb": "lock"})
     clear_guard_lock()
-    clear_admission_token()
     if resp and resp.get("ok"):
         theme.success("Locked.")
         return 0
@@ -673,6 +740,15 @@ def cmd_status(_args: argparse.Namespace) -> int:
         theme.out(f"admitted: {'yes' if resp.get('admitted') else 'no'}")
         if resp.get("admitted_since"):
             theme.out(f"admitted_since: {resp.get('admitted_since')}")
+        if resp.get("admitted_pids"):
+            theme.out(f"admitted_pids: {resp.get('admitted_pids')}")
+        if resp.get("granted_secrets"):
+            theme.out(f"granted_secrets: {resp.get('granted_secrets')}")
+        if resp.get("granted_until"):
+            theme.out(f"granted_until: {resp.get('granted_until')}")
+        if resp.get("pre_admit_pending"):
+            theme.out(f"pre_admit_pending: yes (scope: {resp.get('pre_admit_scope')})")
+            theme.out(f"pre_admit_until: {resp.get('pre_admit_until')}")
         theme.out(f"request_count: {resp.get('request_count', 0)}")
     else:
         theme.out(f"pid: {lock.get('pid')}")
@@ -757,12 +833,20 @@ def main(argv: list[str] | None = None) -> int:
         "copy": cmd_copy,
         "config": cmd_config,
         "status": cmd_status,
+        "connect": cmd_status,  # plain alias — no separate guard verb
         "setup": cmd_setup,
     }
     handler = handlers.get(args.command)
     if handler is None:
         parser.print_help()
         return 2
+    # `--name` is a display-only label for the guard's admission prompt —
+    # never a credential (see guard.guard_request / default_admit_prompt).
+    # Passed via env var so it reaches guard_request() without threading
+    # an extra parameter through every command function's call chain.
+    name = getattr(args, "name", None)
+    if name:
+        os.environ["KEY_AMNESIA_CLIENT_NAME"] = name
     return handler(args)
 
 
