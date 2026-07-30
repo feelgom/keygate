@@ -35,6 +35,7 @@ dependencies = [
 Homepage = "https://github.com/fujitoid/key-amnesia"
 Repository = "https://github.com/fujitoid/key-amnesia"
 Issues = "https://github.com/fujitoid/key-amnesia/issues"
+Funding = "https://www.buymeacoffee.com/fujitoid"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
