@@ -144,6 +144,12 @@ On a real terminal, status lines use a restrained brushed-chrome palette (cool c
 
 Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX) or [GitHub issues](https://github.com/fujitoid/key-amnesia/issues).
 
+## Support
+
+key-amnesia is free and open source. If it's useful to you, you can support its development here:
+
+<a href="https://www.buymeacoffee.com/fujitoid" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;" ></a>
+
 ## Development
 
 ```bash
