@@ -95,6 +95,7 @@ ka lock                             # end it early, any time
 | `ka passwd` / `ka change-password` | Change the master password (re-encrypts the vault with a fresh salt; refuses while a session is active) |
 | `ka set NAME` | Store or update a secret (value typed hidden; password required; vault must already exist) |
 | `ka remove NAME` | Delete a secret (password required) |
+| `ka import FILE` | Import a dotenv-format file's `NAME=value` pairs into the vault (TTY-only, like `ka init`) — asks before overwriting a name that already exists, and offers to delete/rename the source file, add `.env*` to `.gitignore`, and generate/merge a minimal `amnesia.toml` |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
 | `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start a cached session; `--pre-admit` loudly auto-admits the very next connecting process for a bounded window (15m default), without a yes/no prompt — scope it to specific secrets with `--pre-admit-secret`, repeatable, or leave it off for ALL secrets |
@@ -120,6 +121,7 @@ For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 - **Audit log:** `~/.key-amnesia/audit.log`, append-only JSON lines — timestamp, action, secret names (never values), route, allowed/denied/timeout.
 - **Admission consent, bound to real process identity:** the first command from an unrecognized process reaching a live guard triggers a one-time yes/no prompt in the guard's own terminal window. Approval is tied to that connecting process's **kernel-verified identity** (its actual OS pid + creation time, confirmed by the operating system itself — not anything the client claims) — a real child process of an already-approved one is recognized automatically; a separate, unrelated process gets its own prompt. There is no on-disk admission credential to steal. This sits on top of — never replaces — the hard guarantee above.
 - **Honest death reporting:** `ka lock` / `ka status` tell you what actually happened to the last session (`locked`, `expired`, `interrupted`, or `crashed: <reason>`) instead of a bare "no active session."
+- **`ka import` reads the local file directly, on purpose.** Unlike `ka set`, which always has *you* type the value so nothing ever passes through an agent, `ka import` is TTY-only (never routed through the spawned-console agent-safe helper) and parses the dotenv file itself — it still never prints a value to your screen or anywhere else, and every follow-up decision (overwrite an existing name, delete or rename the source file, add `.env*` to `.gitignore`) is an explicit prompt, never silent.
 
 Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
 
