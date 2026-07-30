@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 from datetime import datetime, timezone
@@ -60,12 +61,8 @@ def _normalize_payload(payload: dict[str, Any], *, warn: bool = True) -> dict[st
     return payload
 
 
-def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
-    """Decrypt and return the vault JSON payload."""
-    p = Path(path) if path is not None else vault_path()
-    if not p.exists():
-        raise VaultError(f"Vault not found: {p}")
-    data = p.read_bytes()
+def _read_header(data: bytes) -> tuple[bytes, int, int, bytes]:
+    """Parse the fixed header, returning (salt, opslimit, memlimit, ciphertext blob)."""
     if len(data) < HEADER_SIZE:
         raise VaultError("Vault file too short")
     magic, version, salt, opslimit, memlimit = struct.unpack(
@@ -75,13 +72,10 @@ def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
         raise VaultError("Invalid vault magic")
     if version != VERSION:
         raise VaultError(f"Unsupported vault version: {version}")
-    blob = data[HEADER_SIZE:]
-    key = crypto.derive_key(
-        password.encode("utf-8"),
-        salt,
-        opslimit=opslimit,
-        memlimit=memlimit,
-    )
+    return salt, opslimit, memlimit, data[HEADER_SIZE:]
+
+
+def _decrypt_payload(key: bytes, blob: bytes) -> dict[str, Any]:
     try:
         plaintext = crypto.decrypt(key, blob)
     except crypto.CryptoError_ as e:
@@ -93,6 +87,69 @@ def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or "secrets" not in payload:
         raise VaultError("Vault payload missing secrets")
     return _normalize_payload(payload)
+
+
+def load_vault_with_key(path: Path | str | None, password: str) -> tuple[dict[str, Any], bytes]:
+    """Decrypt the vault and return `(payload, derived_key)`.
+
+    Runs Argon2id exactly once. Callers that need to hold onto the derived
+    SecretBox key for a later no-KDF re-open (e.g. the guard's stale-secrets
+    reload — see `load_vault_with_retained_key`) should use this instead of
+    `load_vault` to avoid deriving the key twice.
+    """
+    p = Path(path) if path is not None else vault_path()
+    if not p.exists():
+        raise VaultError(f"Vault not found: {p}")
+    data = p.read_bytes()
+    salt, opslimit, memlimit, blob = _read_header(data)
+    key = crypto.derive_key(
+        password.encode("utf-8"),
+        salt,
+        opslimit=opslimit,
+        memlimit=memlimit,
+    )
+    payload = _decrypt_payload(key, blob)
+    return payload, key
+
+
+def load_vault(path: Path | str | None, password: str) -> dict[str, Any]:
+    """Decrypt and return the vault JSON payload."""
+    payload, _key = load_vault_with_key(path, password)
+    return payload
+
+
+def load_vault_with_retained_key(path: Path | str | None, key: bytes) -> dict[str, Any]:
+    """Decrypt the vault using an already-derived SecretBox key — no Argon2id.
+
+    Used by the guard's stale-secrets reload: the guard retains the derived
+    key from the `ka unlock` password prompt and re-opens the vault file
+    whenever its content changes, without re-running the deliberately-slow
+    Argon2id KDF and without ever seeing the password again.
+    """
+    p = Path(path) if path is not None else vault_path()
+    if not p.exists():
+        raise VaultError(f"Vault not found: {p}")
+    data = p.read_bytes()
+    _salt, _opslimit, _memlimit, blob = _read_header(data)
+    return _decrypt_payload(key, blob)
+
+
+def vault_fingerprint(path: Path | str | None = None) -> str | None:
+    """Cheap content fingerprint (size + mtime + hash) of the vault file.
+
+    Used to detect a `ka set`/`ka remove` write from another process without
+    re-decrypting on every request. Returns `None` if the file can't
+    currently be read (missing, or caught mid-write) so callers can treat
+    "no fingerprint" as "nothing to compare yet" rather than crashing.
+    """
+    p = Path(path) if path is not None else vault_path()
+    try:
+        st = p.stat()
+        data = p.read_bytes()
+    except OSError:
+        return None
+    digest = hashlib.sha256(data).hexdigest()
+    return f"{st.st_size}:{st.st_mtime_ns}:{digest}"
 
 
 def save_vault(

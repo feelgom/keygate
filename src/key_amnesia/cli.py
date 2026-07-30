@@ -23,6 +23,7 @@ from key_amnesia.vault import (
     VaultError,
     empty_payload,
     load_vault,
+    load_vault_with_key,
     read_names,
     save_vault,
 )
@@ -468,7 +469,7 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
 
     if password is not None:
         try:
-            payload = load_vault(None, password)
+            payload, vkey = load_vault_with_key(None, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             audit_event(
@@ -476,7 +477,12 @@ def cmd_unlock(_args: argparse.Namespace) -> int:
             )
             return 1
         audit_event("unlock", route=outcome.route, result="allowed")
-        return run_foreground_guard(payload, timeout_min)
+        # Retain only the derived key (never the password) so the guard can
+        # reload the vault on a content change without a fresh Argon2id run
+        # or a second password prompt — see guard._maybe_reload_secrets.
+        return run_foreground_guard(
+            payload, timeout_min, vault_path=vault_path(), vault_key=vkey
+        )
 
     theme.error(f"Denied: {outcome.reason or 'unlock failed'}")
     return 1
