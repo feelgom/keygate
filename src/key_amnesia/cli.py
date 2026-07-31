@@ -104,7 +104,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="key-amnesia",
         description=(
-            "Encrypted secret vault with human-prompt routing and output scrubbing."
+            "Encrypted secret vault with human-prompt routing and output scrubbing. "
+            "Windows and Linux supported; macOS isolated-console spawn is experimental."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

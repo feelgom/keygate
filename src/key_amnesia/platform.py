@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from key_amnesia import theme
@@ -40,6 +45,114 @@ _PKG_MANAGERS: tuple[tuple[str, str], ...] = (
 # away (e.g. a broken alias, or a build that doesn't accept our -e/-- flag).
 # Overridable so tests don't pay this cost.
 _POLL_DELAY_S = 0.15
+
+# macOS: open/osascript return immediately — parent polls a PID file written by
+# a wrapper that then execs the helper. Overridable for tests.
+_MACOS_PID_WAIT_S = 8.0
+_MACOS_PID_POLL_S = 0.05
+
+# Visible Terminal.app window path is unconfirmed by a real Mac user.
+MACOS_SPAWN_EXPERIMENTAL = True
+
+# Embedded into the temp wrapper script; must stay self-contained (no imports
+# from key_amnesia — the wrapper may run before the package is on PYTHONPATH
+# the way Terminal.app launches it).
+_MACOS_WRAPPER_SOURCE = '''\
+import json
+import os
+import sys
+
+def main() -> None:
+    if len(sys.argv) < 4:
+        sys.stderr.write("key-amnesia macOS wrapper: missing args\\n")
+        sys.exit(2)
+    env_path, pid_path = sys.argv[1], sys.argv[2]
+    helper = sys.argv[3:]
+    with open(env_path, "r", encoding="utf-8") as f:
+        env = json.load(f)
+    try:
+        os.unlink(env_path)
+    except OSError:
+        pass
+    os.environ.clear()
+    os.environ.update({str(k): str(v) for k, v in env.items()})
+    with open(pid_path, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.execvpe(helper[0], helper, os.environ)
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+class PidFileProcess:
+    """Popen-like handle bound to a helper PID from a PID file (macOS).
+
+    ``open -a Terminal`` / ``osascript`` exit immediately, so the launcher
+    Popen cannot be waited on for parent-death or cancel. The wrapper records
+    its PID (stable across ``exec`` of the helper) and this object exposes
+    ``poll`` / ``terminate`` against that PID.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        *,
+        cleanup_paths: list[Path] | None = None,
+        cleanup_dir: Path | None = None,
+    ) -> None:
+        self.pid = int(pid)
+        self.returncode: int | None = None
+        self._cleanup_paths = list(cleanup_paths or [])
+        self._cleanup_dir = cleanup_dir
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            self.returncode = 0
+            self._cleanup()
+            return 0
+        except PermissionError:
+            # Exists but not signalable — treat as alive.
+            return None
+        except OSError:
+            self.returncode = 0
+            self._cleanup()
+            return 0
+        return None
+
+    def terminate(self) -> None:
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    def _cleanup(self) -> None:
+        for p in self._cleanup_paths:
+            try:
+                p.unlink(missing_ok=True)  # type: ignore[call-arg]
+            except TypeError:
+                # Python <3.8 missing_ok — not our floor, but be safe.
+                try:
+                    if p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+        if self._cleanup_dir is not None:
+            try:
+                self._cleanup_dir.rmdir()
+            except OSError:
+                pass
 
 
 def _has_interactive_display() -> bool:
@@ -231,6 +344,160 @@ def _spawn_linux(
     raise _no_emulator_oserror()
 
 
+def _applescript_quote(s: str) -> str:
+    """Quote *s* as an AppleScript string literal."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _wait_for_pid_file(pid_path: Path, *, timeout_s: float | None = None) -> int:
+    """Poll *pid_path* until it contains a positive integer PID."""
+    limit = _MACOS_PID_WAIT_S if timeout_s is None else timeout_s
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        try:
+            text = pid_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text.isdigit():
+            pid = int(text)
+            if pid > 0:
+                return pid
+        if _MACOS_PID_POLL_S:
+            time.sleep(_MACOS_PID_POLL_S)
+    raise OSError(
+        "macOS isolated-console helper did not record a PID in time "
+        "(Terminal/osascript may have failed to launch). Fail closed."
+    )
+
+
+def _macos_launcher_argv(
+    wrapper_py: Path,
+    env_file: Path,
+    pid_file: Path,
+    helper_argv: list[str],
+    *,
+    command_file: Path | None = None,
+) -> list[str]:
+    """Build osascript/open argv. Secrets stay in *env_file*, never on argv."""
+    inner = " ".join(
+        shlex.quote(p)
+        for p in [
+            sys.executable,
+            str(wrapper_py),
+            str(env_file),
+            str(pid_file),
+            *helper_argv,
+        ]
+    )
+    osascript = shutil.which("osascript")
+    if osascript:
+        script = (
+            'tell application "Terminal"\n'
+            f"  do script {_applescript_quote(inner)}\n"
+            "  activate\n"
+            "end tell"
+        )
+        return [osascript, "-e", script]
+
+    open_bin = shutil.which("open")
+    if open_bin and command_file is not None:
+        return [open_bin, "-a", "Terminal", str(command_file)]
+
+    raise OSError(
+        "Neither osascript nor open found on PATH; cannot spawn macOS "
+        "isolated console. Fail closed."
+    )
+
+
+def _spawn_macos(
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    popen_fn: Callable[..., Any],
+) -> PidFileProcess:
+    """Spawn helper via Terminal.app using a PID-file wrapper.
+
+    ``open`` / ``osascript`` return immediately; the wrapper writes its PID
+    then ``exec``s the helper so parent-death / ``poll`` / ``terminate`` track
+    the real helper, not the launcher.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="key-amnesia-macos-"))
+    try:
+        try:
+            tmp.chmod(0o700)
+        except OSError:
+            pass
+
+        env_file = tmp / "env.json"
+        pid_file = tmp / "helper.pid"
+        wrapper_py = tmp / "wrapper.py"
+        command_file = tmp / "run.command"
+
+        env_file.write_text(
+            json.dumps({str(k): str(v) for k, v in env.items()}),
+            encoding="utf-8",
+        )
+        try:
+            env_file.chmod(0o600)
+        except OSError:
+            pass
+
+        wrapper_py.write_text(_MACOS_WRAPPER_SOURCE, encoding="utf-8")
+        try:
+            wrapper_py.chmod(0o700)
+        except OSError:
+            pass
+
+        # open -a Terminal fallback: a .command file Terminal will execute.
+        inner = " ".join(
+            shlex.quote(p)
+            for p in [
+                sys.executable,
+                str(wrapper_py),
+                str(env_file),
+                str(pid_file),
+                *argv,
+            ]
+        )
+        command_file.write_text("#!/bin/bash\nexec " + inner + "\n", encoding="utf-8")
+        try:
+            command_file.chmod(0o700)
+        except OSError:
+            pass
+
+        launch_argv = _macos_launcher_argv(
+            wrapper_py, env_file, pid_file, argv, command_file=command_file
+        )
+        # Launcher env is the *caller's* environment without prompt secrets —
+        # those live only in env.json until the wrapper loads and unlinks it.
+        try:
+            popen_fn(launch_argv, close_fds=True)
+        except OSError as e:
+            raise OSError(
+                f"Failed to launch macOS Terminal for isolated console: {e}. "
+                "Fail closed."
+            ) from e
+
+        helper_pid = _wait_for_pid_file(pid_file)
+        return PidFileProcess(
+            helper_pid,
+            cleanup_paths=[env_file, pid_file, wrapper_py, command_file],
+            cleanup_dir=tmp,
+        )
+    except Exception:
+        # Best-effort scrub of the temp dir (may still hold env.json).
+        for p in tmp.iterdir() if tmp.exists() else []:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            tmp.rmdir()
+        except OSError:
+            pass
+        raise
+
+
 def spawn_isolated_console(
     argv: list[str],
     env: dict[str, str],
@@ -242,7 +509,9 @@ def spawn_isolated_console(
     Windows: CREATE_NEW_CONSOLE, no stdio kwargs.
     Linux: first available of x-terminal-emulator / gnome-terminal / konsole /
     xterm when DISPLAY or WAYLAND_DISPLAY is set; otherwise fail closed.
-    macOS and other platforms: fail closed (not yet implemented).
+    macOS (experimental): Terminal.app via osascript/open + PID-file wrapper
+    so parent-death tracks the helper, not the short-lived launcher.
+    Other platforms: fail closed.
     """
     popen = popen_fn or subprocess.Popen
 
@@ -259,7 +528,10 @@ def spawn_isolated_console(
     if sys.platform.startswith("linux"):
         return _spawn_linux(argv, env, popen_fn=popen)
 
+    if sys.platform == "darwin":
+        return _spawn_macos(argv, env, popen_fn=popen)
+
     raise OSError(
         "Isolated-console spawn is not implemented on this platform "
-        f"({sys.platform}); macOS and others remain fail-closed. Fail closed."
+        f"({sys.platform}); fail closed."
     )

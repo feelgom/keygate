@@ -348,16 +348,9 @@ def test_pkg_manager_detection_order(monkeypatch) -> None:
     assert _pkg_install_command("xterm") == "sudo apt-get install xterm"
 
 
-def test_darwin_fail_closed(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setenv("DISPLAY", ":0")
-
-    with pytest.raises(OSError, match="not implemented|Fail closed"):
-        spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())
-
-
 def test_other_platform_fail_closed(monkeypatch) -> None:
+    """Non-Win/Linux/Darwin platforms still fail closed (macOS covered in test_macos)."""
     monkeypatch.setattr(sys, "platform", "freebsd14")
 
-    with pytest.raises(OSError, match="not implemented|Fail closed"):
+    with pytest.raises(OSError, match="not implemented|fail closed|Fail closed"):
         spawn_isolated_console(HELPER_ARGV, dict(SENSITIVE_ENV), popen_fn=MagicMock())

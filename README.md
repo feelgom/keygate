@@ -51,7 +51,7 @@ pip install key-amnesia
 
 Or from source: `pip install git+https://github.com/fujitoid/key-amnesia`, or from a local clone: `pip install .` — every path gets you both the full `key-amnesia` command and the short `ka` alias.
 
-> Windows and Linux supported; macOS still falls back to fail-closed (not yet implemented).
+> Windows and Linux supported. macOS isolated-console spawn is **experimental** (PID-file wrapper around Terminal.app / osascript) until a real Mac user confirms the visible window path — see [wiki — macOS](https://github.com/fujitoid/key-amnesia/wiki/macOS).
 
 ### Agent bootstrap
 

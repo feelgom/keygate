@@ -185,7 +185,7 @@ def require_human_auth(
             return AuthOutcome(ok=False, route="inline", reason="empty password")
         return AuthOutcome(ok=True, route="inline", password=password)
 
-    # Non-interactive: spawn helper console (Windows only).
+    # Non-interactive: spawn helper console (Win / Linux / experimental macOS).
     listener = None
     proc = None
     try:

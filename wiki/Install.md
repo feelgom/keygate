@@ -8,8 +8,9 @@ Or from source: `pip install git+https://github.com/fujitoid/key-amnesia`,
 or from a local clone: `pip install .`. You get both `key-amnesia` and the
 `ka` alias.
 
-Windows and Linux are supported. macOS still fails closed for isolated
-console spawn — see [macOS](macOS).
+Windows and Linux are supported. macOS isolated-console spawn is
+**experimental** (PID-file wrapper; visible Terminal.app window unconfirmed)
+— see [macOS](macOS).
 
 ## Agent setup
 
