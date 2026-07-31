@@ -1,20 +1,21 @@
 """Kernel-verified peer process identity for guard admission.
 
 Replaces the pre-0.3.8 model where admission trusted a message-supplied
-`caller_pid` plus a machine-global bearer token file
-(`admitted_session.token`) — after one approval, *any* same-user process
-that could read that file was admitted. This module instead asks the
-**kernel** who is on the other end of the already-authenticated IPC
-connection:
+`claimed_pid_unverified` (formerly `caller_pid`) plus a machine-global
+bearer token file (`admitted_session.token`) — after one approval, *any*
+same-user process that could read that file was admitted. This module
+instead asks the **kernel** who is on the other end of the already-
+authenticated IPC connection:
 
 - Windows: `GetNamedPipeClientProcessId` on the connected pipe handle,
   then an **immediate** `OpenProcess` + `GetProcessTimes` on that bare pid.
-  Reading the creation timestamp right away — rather than trusting the pid
-  alone — closes the main window for a pid-recycle mixup: a later check
-  against a *different* process that happens to reuse the same pid number
-  will read back a different creation time and fail to match. Residual:
+  For the peer that will be *admitted*, that `OpenProcess` handle is
+  **held for the admission lifetime** — while a handle to the process
+  object is open, Windows will not recycle that PID. Residual race: only
   the brief window between `GetNamedPipeClientProcessId` and `OpenProcess`
-  itself (documented, not eliminated — see DESIGN.md).
+  itself (documented, not eliminated — see DESIGN.md / README).
+  Ancestor-chain walks still open-read-close (they are not the admitted
+  root and do not need a long-lived handle).
 - Linux: `SO_PEERCRED` on the connected socket (kernel-verified pid/uid/gid
   at accept time — considerably stronger than the Windows path), then an
   immediate `/proc/<pid>/stat` read for the same creation-time comparison.
@@ -22,15 +23,16 @@ connection:
   which callers must treat as an unrecognized peer (fail closed), exactly
   like the rest of this project's isolated-console spawn story.
 
-Never trust message fields for identity — a `caller_pid` in the IPC
-payload is attacker-controlled and is not read by anything in this module.
+Never trust message fields for identity — a `claimed_pid_unverified` in
+the IPC payload is attacker-controlled and is not read by anything in
+this module.
 """
 
 from __future__ import annotations
 
 import struct
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 
 # Bound on how many parent hops we're willing to walk. Real process trees
@@ -44,6 +46,33 @@ class PeerIdentityError(Exception):
     unrecognized peer, never fall back to a message-supplied pid."""
 
 
+@dataclass
+class _WinProcessHandle:
+    """Owned Windows `OpenProcess` HANDLE — closed exactly once.
+
+    Holding this open for an admitted peer prevents Windows from recycling
+    that PID for the lifetime of the admission (the residual race is only
+    the brief window *before* OpenProcess succeeds — see module docstring).
+    """
+
+    handle: int
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed or not self.handle:
+            return
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(self.handle)  # type: ignore[attr-defined]
+        self._closed = True
+
+    def __del__(self) -> None:  # pragma: no cover — best-effort GC cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class PeerIdentity:
     """A kernel-verified `(pid, start_time)` pair — the unit of admission trust.
@@ -53,13 +82,26 @@ class PeerIdentity:
     ticks since 1601 from `GetProcessTimes`; Linux: clock ticks since boot,
     field 22 of `/proc/<pid>/stat`) — never format it for a human and never
     compare instances captured on different platforms.
+
+    On Windows, `process_handle` may hold an open `OpenProcess` HANDLE for
+    the admission lifetime (peer from `get_peer_identity` only). Call
+    `release()` when the admission ends. Ancestor-walk identities do not
+    hold a handle. Not part of equality / hashing.
     """
 
     pid: int
     start_time: int
+    process_handle: _WinProcessHandle | None = field(
+        default=None, compare=False, hash=False, repr=False
+    )
 
     def matches(self, other: "PeerIdentity") -> bool:
         return self.pid == other.pid and self.start_time == other.start_time
+
+    def release(self) -> None:
+        """Drop any held OS process handle (Windows admission root only)."""
+        if self.process_handle is not None:
+            self.process_handle.close()
 
 
 # --- Windows ---------------------------------------------------------------
@@ -86,14 +128,13 @@ def _win_process_times(handle: int) -> int:
     return int(creation.value)
 
 
-def _win_identity_for_pid(pid: int) -> PeerIdentity:
+def _win_identity_for_pid(pid: int, *, hold: bool = False) -> PeerIdentity:
     """Open *pid* immediately and read its creation time from that handle.
 
-    This is the "immediate OpenProcess" step the design calls for: the
-    handle ties the rest of this lookup to the exact kernel process object
-    that held `pid` at the moment we opened it, so a *subsequent* reuse of
-    that pid number by an unrelated process cannot be mistaken for this one
-    — its creation time will differ and any later comparison will fail.
+    When *hold* is True (connecting peer about to be admitted), the
+    OpenProcess HANDLE is retained on the returned `PeerIdentity` for the
+    admission lifetime — Windows will not recycle that PID while the handle
+    stays open. Ancestor-chain walks use hold=False (open-read-close).
     """
     import ctypes
 
@@ -104,8 +145,16 @@ def _win_identity_for_pid(pid: int) -> PeerIdentity:
         raise PeerIdentityError(f"OpenProcess failed for pid {pid}")
     try:
         start_time = _win_process_times(handle)
-    finally:
+    except Exception:
         ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+        raise
+    if hold:
+        return PeerIdentity(
+            pid=pid,
+            start_time=start_time,
+            process_handle=_WinProcessHandle(handle=int(handle)),
+        )
+    ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
     return PeerIdentity(pid=pid, start_time=start_time)
 
 
@@ -119,7 +168,8 @@ def _win_get_peer_identity(conn: Connection) -> PeerIdentity:
     )
     if not ok:
         raise PeerIdentityError("GetNamedPipeClientProcessId failed")
-    return _win_identity_for_pid(int(client_pid.value))
+    # Hold the process handle for admission lifetime (plan A1).
+    return _win_identity_for_pid(int(client_pid.value), hold=True)
 
 
 def _win_parent_pid(pid: int) -> int | None:
