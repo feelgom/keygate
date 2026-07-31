@@ -1,4 +1,10 @@
-"""Vault binary layout, load/save, and names sidecar."""
+"""Vault binary layout, load/save, and names sidecar.
+
+Supports:
+- **KAM1** — whole-vault Argon2id + SecretBox (default until roles are enabled)
+- **KAM2** — same outer AEAD; inner payload uses per-secret data keys +
+  SealedBox wraps and signed member/ACL metadata (see DESIGN.md § KAM2)
+"""
 
 from __future__ import annotations
 
@@ -13,8 +19,13 @@ from key_amnesia import crypto
 from key_amnesia import theme
 from key_amnesia.paths import names_path, vault_path
 
-MAGIC = b"KAM1"
-VERSION = 1
+MAGIC_KAM1 = b"KAM1"
+MAGIC_KAM2 = b"KAM2"
+# Back-compat aliases used by older tests / callers.
+MAGIC = MAGIC_KAM1
+VERSION_KAM1 = 1
+VERSION_KAM2 = 1
+VERSION = VERSION_KAM1
 HEADER_FMT = "<4sB16sQQ"  # magic, version, salt, opslimit, memlimit
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
@@ -40,6 +51,18 @@ def empty_payload() -> dict[str, Any]:
     }
 
 
+def detect_vault_magic(path: Path | str) -> bytes | None:
+    """Return the 4-byte magic of a vault file, or None if unreadable/too short."""
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 4:
+        return None
+    return data[:4]
+
+
 def _normalize_payload(payload: dict[str, Any], *, warn: bool = True) -> dict[str, Any]:
     """Drop obsolete browser-fill keys (removed in 0.3.0) before use.
 
@@ -61,21 +84,26 @@ def _normalize_payload(payload: dict[str, Any], *, warn: bool = True) -> dict[st
     return payload
 
 
-def _read_header(data: bytes) -> tuple[bytes, int, int, bytes]:
-    """Parse the fixed header, returning (salt, opslimit, memlimit, ciphertext blob)."""
+def _read_header(data: bytes) -> tuple[bytes, int, bytes, int, int, bytes]:
+    """Parse the fixed header.
+
+    Returns (magic, version, salt, opslimit, memlimit, ciphertext blob).
+    """
     if len(data) < HEADER_SIZE:
         raise VaultError("Vault file too short")
     magic, version, salt, opslimit, memlimit = struct.unpack(
         HEADER_FMT, data[:HEADER_SIZE]
     )
-    if magic != MAGIC:
+    if magic not in (MAGIC_KAM1, MAGIC_KAM2):
         raise VaultError("Invalid vault magic")
-    if version != VERSION:
-        raise VaultError(f"Unsupported vault version: {version}")
-    return salt, opslimit, memlimit, data[HEADER_SIZE:]
+    if magic == MAGIC_KAM1 and version != VERSION_KAM1:
+        raise VaultError(f"Unsupported KAM1 version: {version}")
+    if magic == MAGIC_KAM2 and version != VERSION_KAM2:
+        raise VaultError(f"Unsupported KAM2 version: {version}")
+    return magic, version, salt, opslimit, memlimit, data[HEADER_SIZE:]
 
 
-def _decrypt_payload(key: bytes, blob: bytes) -> dict[str, Any]:
+def _decrypt_outer(key: bytes, blob: bytes) -> dict[str, Any]:
     try:
         plaintext = crypto.decrypt(key, blob)
     except crypto.CryptoError_ as e:
@@ -84,9 +112,32 @@ def _decrypt_payload(key: bytes, blob: bytes) -> dict[str, Any]:
         payload = json.loads(plaintext.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise VaultError("Vault payload is corrupt") from e
-    if not isinstance(payload, dict) or "secrets" not in payload:
+    if not isinstance(payload, dict):
+        raise VaultError("Vault payload is not an object")
+    return payload
+
+
+def _payload_from_inner(magic: bytes, inner: dict[str, Any], *, warn: bool) -> dict[str, Any]:
+    """Normalize an outer-decrypted JSON object into the in-memory payload.
+
+    KAM1: secrets are plaintext strings.
+    KAM2: secrets are ciphertext+wraps; decode to plaintext using admin_box_sk
+    (present inside the password AEAD).
+    """
+    if magic == MAGIC_KAM2 or inner.get("format") == "KAM2":
+        from key_amnesia.roles import decode_wrapped_secrets_after_load
+
+        try:
+            payload = decode_wrapped_secrets_after_load(inner)
+        except VaultError:
+            raise
+        except Exception as e:
+            raise VaultError(f"KAM2 decode failed: {e}") from e
+        return _normalize_payload(payload, warn=warn)
+
+    if "secrets" not in inner:
         raise VaultError("Vault payload missing secrets")
-    return _normalize_payload(payload)
+    return _normalize_payload(inner, warn=warn)
 
 
 def load_vault_with_key(path: Path | str | None, password: str) -> tuple[dict[str, Any], bytes]:
@@ -96,19 +147,23 @@ def load_vault_with_key(path: Path | str | None, password: str) -> tuple[dict[st
     SecretBox key for a later no-KDF re-open (e.g. the guard's stale-secrets
     reload — see `load_vault_with_retained_key`) should use this instead of
     `load_vault` to avoid deriving the key twice.
+
+    Returned payload always exposes ``secrets`` as plaintext name→value for
+    password holders (KAM2 unwraps via admin_box_sk inside the outer AEAD).
     """
     p = Path(path) if path is not None else vault_path()
     if not p.exists():
         raise VaultError(f"Vault not found: {p}")
     data = p.read_bytes()
-    salt, opslimit, memlimit, blob = _read_header(data)
+    magic, _version, salt, opslimit, memlimit, blob = _read_header(data)
     key = crypto.derive_key(
         password.encode("utf-8"),
         salt,
         opslimit=opslimit,
         memlimit=memlimit,
     )
-    payload = _decrypt_payload(key, blob)
+    inner = _decrypt_outer(key, blob)
+    payload = _payload_from_inner(magic, inner, warn=True)
     return payload, key
 
 
@@ -130,8 +185,9 @@ def load_vault_with_retained_key(path: Path | str | None, key: bytes) -> dict[st
     if not p.exists():
         raise VaultError(f"Vault not found: {p}")
     data = p.read_bytes()
-    _salt, _opslimit, _memlimit, blob = _read_header(data)
-    return _decrypt_payload(key, blob)
+    magic, _version, _salt, _opslimit, _memlimit, blob = _read_header(data)
+    inner = _decrypt_outer(key, blob)
+    return _payload_from_inner(magic, inner, warn=True)
 
 
 def vault_fingerprint(path: Path | str | None = None) -> str | None:
@@ -159,7 +215,11 @@ def save_vault(
     *,
     salt: bytes | None = None,
 ) -> None:
-    """Encrypt and write the vault. Always uses OPSLIMIT/MEMLIMIT_SENSITIVE."""
+    """Encrypt and write the vault. Always uses OPSLIMIT/MEMLIMIT_SENSITIVE.
+
+    If ``payload`` carries ``kam2`` metadata, writes **KAM2** (per-secret wraps).
+    Otherwise writes **KAM1**. Users who never enable roles stay on KAM1.
+    """
     p = Path(path) if path is not None else vault_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     if salt is None:
@@ -185,14 +245,35 @@ def save_vault(
     body["updated_at"] = _utc_now_iso()
     if "secrets" not in body:
         body["secrets"] = {}
-    plaintext = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    if isinstance(body.get("kam2"), dict):
+        from key_amnesia.roles import encode_wrapped_secrets_for_save
+
+        inner = encode_wrapped_secrets_for_save(body)
+        magic = MAGIC_KAM2
+        version = VERSION_KAM2
+        secret_names = sorted(body["secrets"].keys())
+    else:
+        # Strip any accidental kam2-only keys for a clean KAM1 write.
+        body.pop("kam2", None)
+        body.pop("format", None)
+        inner = {
+            "secrets": body["secrets"],
+            "created_at": body["created_at"],
+            "updated_at": body["updated_at"],
+        }
+        magic = MAGIC_KAM1
+        version = VERSION_KAM1
+        secret_names = sorted(body["secrets"].keys())
+
+    plaintext = json.dumps(inner, separators=(",", ":"), sort_keys=True).encode("utf-8")
     blob = crypto.encrypt(key, plaintext)
-    header = struct.pack(HEADER_FMT, MAGIC, VERSION, salt, opslimit, memlimit)
+    header = struct.pack(HEADER_FMT, magic, version, salt, opslimit, memlimit)
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_bytes(header + blob)
     tmp.replace(p)
     # Keep names sidecar in sync with encrypted secrets keys.
-    write_names(sorted(body["secrets"].keys()), names_path_for_vault(p))
+    write_names(secret_names, names_path_for_vault(p))
 
 
 def names_path_for_vault(vault: Path) -> Path:

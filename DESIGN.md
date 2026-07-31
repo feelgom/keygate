@@ -12,6 +12,8 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.7 (bugfix, no CLI-surface / no IPC-verb changes):** fixed the guard's stale in-memory secrets snapshot (README limit 9 / "Known limitation" below). `GuardState` gained `vault_path`, `vault_key` (derived SecretBox key only — never the password), and `vault_content_fingerprint`; `run`/`list`/`status` now call `_maybe_reload_secrets`, which re-opens the vault with the retained key (no Argon2id) whenever the fingerprint changes. `cmd_unlock` switched from `load_vault` to `load_vault_with_key` to obtain that key without deriving it twice; `vault.py` gained `load_vault_with_key`, `load_vault_with_retained_key`, and `vault_fingerprint`. Verb set is unchanged — still exactly `{run, list, lock, status, renew}`; no `reload` verb was added (`tests/test_guard_verbs_regression.py` untouched). New exposure: the guard now retains **derived key material** for the session (see "Who holds plaintext" and the note under GuardState below) — same trust tier as the plaintext secrets it already held, but worth naming explicitly. `tests/test_guard_reload.py`.
 
+**0.3.13 (KAM2 roles + `ka export`; PyNaCl only; no IPC-verb changes):** optional enable-triggered vault upgrade from KAM1 to KAM2 on first `ka member add`. Users who never enable roles stay on KAM1. Migration is never silent: announce + confirm, write `vault.bin.kam1.bak`, **verify the backup decrypts**, only then rewrite the live file. KAM2 uses the same outer Argon2id+SecretBox password AEAD; inner payload adds per-secret data keys with PyNaCl `SealedBox` wraps per ACL member, plus an Ed25519 admin signature over member/ACL metadata (**tamper-evident / detection only**). Roles: `admin` / `writer` / `runner`. Identity = local X25519 keypair (`ka identity create`); members added by pubkey. `ka export --for MEMBER` writes a KAMX ciphertext bundle containing only that member's ACL'd secrets. Runner `reveal`/`copy` denial is **policy vs a determined human with the master password; effective vs an agent** using a runner identity. Full implementation-independent byte layout in "KAM2 specification" below. `roles.py`, `tests/test_roles_export.py`. Version `0.3.13` (0.4.0 reserved for PR8 tag).
+
 **0.3.12 (``ka scan`` LEAK report + offer-to-import; no IPC-verb changes):** new `ka scan` walks the project tree from cwd for Locally Exposed Agent Keys — filename hits (`.env*`, `credentials.json`, `.npmrc`, `.pypirc`, SSH private keys, MCP configs) plus light assignment/prefix patterns reused carefully from the secret-guard vocabulary. Default exclusions skip `node_modules`, `.venv`/`venv`, common build dirs, and `.git` internals (`--include-excluded` to include them); git-history scanning is intentionally **not** part of the default path. `--deep` adds known home/shell-history/global-git/MCP config paths (not a full home walk). Reports **names, paths, and counts only** — never prints/logs/copies values. Headline: `N LEAK found — your agent can read N secrets in this project`. Human text or `--json`; non-zero exit when LEAK count > 0. After the report, offers to store **selected** importable dotenv findings into the **project** vault (creates `.amnesia/` if needed) via the PR2 `dotenv_import` shared core — same collision/delete double-confirm / `.env.imported` / gitignore offers as `ka import`; `--yes` skips selection prompts (safe collision skip; no delete/rename/gitignore); `--no-import` / `--json` are report-only. Policy classification: Scan LEAK report is **advisory**. `scan.py`, `tests/test_scan.py`. Version `0.3.12`.
 
 **0.3.11 (project manifest + `ka check`; no IPC-verb changes):** formalizes committed plaintext `amnesia.toml` at the project root as the project contract (no values, no roles). Canonical schema is `[secrets.NAME]` with `required` / `description` / `env`; `ka import` now writes that form (legacy `[[secret]]` array-of-tables from 0.3.9–0.3.10 is still *read*). New `ka check` / `ka check --json` compares required entries against the **project** names sidecar only — no decrypt, no global vault — and exits non-zero on missing required secrets (CI-friendly). `ka run` fails before inject with a clear missing-required list when a project `amnesia.toml` is present. Policy classification: manifest required / `ka check` is a **project contract / CI policy** (project vault only), not cryptography. `manifest.py`, `tests/test_manifest.py`. Version `0.3.11`.
@@ -44,8 +46,9 @@ key-amnesia/
     project.py                     # .amnesia/ walk-up, VaultContext, merge helpers (since 0.3.10)
     manifest.py                    # amnesia.toml schema + ka check (since 0.3.11)
     config.py
-    crypto.py                      # Argon2id + SecretBox (vault only)
-    vault.py                       # binary layout + JSON payload; migrates obsolete fill keys
+    crypto.py                      # Argon2id + SecretBox + SealedBox/Box/Sign (vault + KAM2)
+    vault.py                       # KAM1/KAM2 binary layout + JSON payload; migrates obsolete fill keys
+    roles.py                       # KAM2 members/ACL/identity/export/migration (since 0.3.13)
     dotenv_import.py               # shared dotenv parse + vault-merge core (ka import; ka scan offer-to-import)
     scan.py                        # ka scan LEAK discovery (names/paths/counts only; since 0.3.12)
     scrub.py                       # exact substring replace, no regex
@@ -75,13 +78,15 @@ Deps: `pynacl`, `pyperclip`. Dev: `pytest`.
 
 ## File formats
 
-### Vault (`~/.key-amnesia/vault.bin`, override `KEY_AMNESIA_VAULT_PATH`)
+### Vault KAM1 (`~/.key-amnesia/vault.bin`, override `KEY_AMNESIA_VAULT_PATH`)
+
+Default format until roles are enabled. Users who never touch roles stay on KAM1 forever.
 
 ```
 magic[4]="KAM1" | version[1]=1 | salt[16] | opslimit[8] LE | memlimit[8] LE | SecretBox blob
 ```
 
-Payload JSON:
+Payload JSON (outer SecretBox plaintext):
 
 ```json
 {
@@ -98,6 +103,157 @@ KDF: `argon2id.kdf` with **OPSLIMIT_SENSITIVE / MEMLIMIT_SENSITIVE only** (delib
 **Creation is explicit, not implicit.** `ka init` is the only path that creates a vault: it requires an interactive TTY (refuses non-interactively — vault creation is never routed through the spawned-console/agent flow at all, unlike every other privileged command), prompts for the master password **twice**, and only writes the vault if both entries match exactly; a mismatch aborts with nothing created. `ka set` refuses with a clear error (`"Vault not initialized. Run 'ka init' first."`) if no vault exists yet — it never creates one as a side effect. This replaced an earlier v0 gap where the first `ka set` call silently created the vault from a single, unconfirmed password entry (a typo there was permanent and undetectable until the next unlock attempt failed, with no recovery path since Argon2id + SecretBox provide none by design).
 
 **Changing the master password.** `ka passwd` (alias `ka change-password`) re-encrypts the vault under a new password with a **fresh** Argon2id salt (`save_vault(..., salt=crypto.generate_salt())` — `save_vault` otherwise preserves the existing salt on a same-password re-save). TTY-only like `init` (never routed through the spawned-console helper — the master password never needs to leave this process either way). Refuses outright while a guard session is alive (`theme.error("Lock the vault first: ka lock")`) rather than letting the guard's in-memory key go stale mid-session.
+
+### KAM2 specification (implementation-independent; since 0.3.13)
+
+PyNaCl / libsodium only — no `pyrage`, no `age`. A Rust port should speak the same constructions from this section alone.
+
+#### Outer file layout
+
+Identical field widths to KAM1; magic differs:
+
+```
+offset  size  type           field
+0       4     bytes          magic = "KAM2"
+4       1     u8             version = 1
+5       16    bytes          salt          (Argon2id salt)
+21      8     u64 LE         opslimit      (stored; new writes = OPSLIMIT_SENSITIVE)
+29      8     u64 LE         memlimit      (stored; new writes = MEMLIMIT_SENSITIVE)
+37      …     bytes          ciphertext    (libsodium secretbox: nonce||mac||ct)
+```
+
+Total header size = 37 bytes (`struct "<4sB16sQQ"`).
+
+#### KDF (what is derived vs wrapped)
+
+- **Derived (password → outer key):** `argon2id.kdf(outlen=32, password, salt, opslimit, memlimit)` producing a 32-byte SecretBox key. Defaults locked to **SENSITIVE**. This key opens the *outer* AEAD only.
+- **Not derived from the password:** per-secret 32-byte **data keys** (random); member X25519 keypairs; admin Ed25519 signing keypair. Those live *inside* the outer AEAD (or, for members' public keys only, in cleartext metadata inside that AEAD).
+- Password holders recover every secret by opening the outer box, then opening each secret's SealedBox wrap with `admin_box_sk` (stored inside the outer plaintext). Members without the password cannot open the live vault file; they receive a separate **KAMX export**.
+
+#### Inner plaintext (JSON after outer SecretBox open)
+
+```json
+{
+  "format": "KAM2",
+  "version": 1,
+  "created_at": "<ISO-8601>",
+  "updated_at": "<ISO-8601>",
+  "kam2": {
+    "admin_signing_pk": "<32-byte Ed25519 verify key, hex>",
+    "admin_signing_sk": "<32-byte Ed25519 seed, hex>",
+    "admin_box_pk": "<32-byte X25519 public key, hex>",
+    "admin_box_sk": "<32-byte X25519 secret key, hex>",
+    "members": {
+      "<member_id>": {
+        "name": "<display name>",
+        "role": "admin" | "writer" | "runner",
+        "box_pk": "<32-byte X25519 pk hex>",
+        "added_at": "<ISO-8601>"
+      }
+    },
+    "acl": {
+      "<secret_name>": ["<member_id>", ...]
+    },
+    "acl_signature": "<64-byte Ed25519 signature, hex>"
+  },
+  "secrets": {
+    "<secret_name>": {
+      "ciphertext": "<SecretBox(data_key, utf8(value)) as hex>",
+      "wraps": {
+        "<member_id>": "<SealedBox(member_box_pk, data_key) as hex>"
+      }
+    }
+  }
+}
+```
+
+- **member_id** = lowercase hex of the member's X25519 public key (32 bytes → 64 hex chars). Stable; rename is display-only.
+- **Per-secret wrap scheme:** for each secret, draw a fresh 32-byte `data_key`; `ciphertext = SecretBox(data_key).encrypt(utf8(value))` (libsodium secretbox wire format: 24-byte nonce ‖ mac ‖ ct as produced by PyNaCl); for each `member_id` in `acl[name]` (and always the vault `admin_box_pk`), store `wraps[member_id] = SealedBox(pk).encrypt(data_key)`.
+- **In-memory view after password load:** implementations MUST present `secrets` as plaintext `name → value` to the rest of the CLI/guard by opening wraps with `admin_box_sk`. On save, re-wrap from that plaintext view (fresh data keys each save is allowed and recommended).
+
+#### Admin signature (tamper-**evident**, detection only)
+
+Canonical message bytes = UTF-8 JSON with sorted keys at every level, compact separators `,` / `:`, shape:
+
+```json
+{"acl":{"NAME":["member_id",...]},"members":{"member_id":{"box_pk":"...","name":"...","role":"..."}}}
+```
+
+(`acl` values sorted; `members` entries omit `added_at`.) Signature = Ed25519 over those bytes with `admin_signing_sk`; stored as `acl_signature`. Verification failure is a **warning / detection signal**, not a hard confidentiality boundary — an attacker who can rewrite the outer AEAD already has the password-derived key.
+
+Classification: **cryptographic, detection only**.
+
+#### Roles (capability matrix)
+
+| Role | set/remove/grant | member add/remove | reveal/copy | run/list |
+|---|---|---|---|---|
+| admin | yes | yes | yes | yes |
+| writer | yes | no | yes | yes |
+| runner | no | no | **no** | yes |
+
+Runner reveal/copy denial: **policy** vs a determined human who holds the master password (they can still decrypt the outer AEAD offline); **effective** vs an agent whose local identity is enrolled as `runner`. Apply the gate whenever the local identity's pubkey matches a vault member; if there is no local identity or it is not a member, the password holder is unrestricted (classic single-user mode).
+
+#### KAMX export (`ka export --for <member>`)
+
+Separate file; not the live vault.
+
+```
+offset  size  type     field
+0       4     bytes    magic = "KAMX"
+4       1     u8       version = 1
+5       32    bytes    recipient_box_pk
+37      …     bytes    SealedBox(recipient_pk, utf8(JSON bundle))
+```
+
+Bundle JSON (after SealedBox open):
+
+```json
+{
+  "format": "KAMX",
+  "version": 1,
+  "member_id": "...",
+  "member_name": "...",
+  "exported_at": "...",
+  "secrets": {
+    "NAME": {
+      "ciphertext": "<SecretBox(data_key, value) hex>",
+      "wrap": "<SealedBox(recipient_pk, data_key) hex>"
+    }
+  }
+}
+```
+
+Only secrets whose ACL lists that member are included. Opening requires the recipient's X25519 secret key. Classification: **cryptographic** (PyNaCl SealedBox).
+
+#### Local identity
+
+`~/.key-amnesia/identity.json` (under `KEY_AMNESIA_HOME`):
+
+```json
+{"label":"...","box_sk":"<hex>","box_pk":"<hex>","created_at":"..."}
+```
+
+Created by `ka identity create`. Private key never printed by `ka identity show`.
+
+#### Upgrade rules KAM1 → KAM2
+
+1. **Trigger:** first roles enable (`ka member add` against a KAM1 vault). Never automatic on unrelated commands. Users who never enable roles stay on KAM1.
+2. **Announce + confirm:** state that enabling roles upgrades the format; name the backup path `vault.bin.kam1.bak` (same directory as the vault); require confirmation (`--yes` or interactive). **Never silent.**
+3. **Backup → verify → rewrite:** write a byte-identical copy to `*.kam1.bak`; re-open and decrypt that backup with the password; **only then** write the live file as KAM2. An unverified backup is not a backup — abort leaves the live KAM1 file untouched.
+4. **Bootstrap content:** generate vault-local admin X25519 + Ed25519 keypairs; create member `admin` with role `admin`; ACL every existing secret to admin; re-wrap secrets; sign ACL; then add the requested new member.
+5. **Downgrade:** not supported. Keep the `.kam1.bak` if a pin to an older key-amnesia is needed.
+6. **Tests / ops:** exercise only under throwaway `KEY_AMNESIA_HOME` / `KEY_AMNESIA_VAULT_PATH` — never the maintainer's daily vault.
+
+#### Policy vs cryptography (KAM2 rows)
+
+| Feature | Class |
+|---|---|
+| Outer Argon2id + SecretBox | Crypto |
+| Per-secret data-key + SealedBox wraps / export | Crypto (PyNaCl) |
+| Admin Ed25519 signature over members+ACL | Crypto, **detection only** |
+| runner cannot reveal/copy | **Policy** vs human with password; **effective** vs agent |
+| writer cannot manage members | Policy |
+| ACL decides export contents | Crypto (wraps) + policy (CLI grant/revoke) |
 
 ### Names sidecar (prompt-free `list`)
 
@@ -341,7 +497,11 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `list` — read names sidecar (no prompt); never values
 - `unlock [--pre-admit] [--pre-admit-secret NAME ...]` — *is* the guard; blocks in the caller's own terminal until locked/expired/interrupted; `--pre-admit` loudly arms a single-use, bounded-window auto-admit for the next unrecognized peer (see "Admission consent" above)
 - `lock` — tear down the live guard session (or report the last one's honest fate if none is live)
-- `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule
+- `reveal` / `copy` — always fresh auth; display location follows TTY vs helper rule; **denied for runner identity** (policy vs human; effective vs agent)
+- `identity create|show` — local X25519 keypair for KAM2 membership (`identity.json`)
+- `member add|list|remove` — first `add` on KAM1 triggers confirmed KAM1→KAM2 migration (verified `.kam1.bak`); roles admin/writer/runner
+- `grant` / `revoke` — KAM2 ACL (drives cryptographic wraps on save/export)
+- `export --for MEMBER` — KAMX ciphertext for one recipient, only their ACL'd secrets
 - `config set session-mode|session-timeout-minutes|prompt-timeout-seconds|pre-admit-seconds` — always fresh auth
 - `status` (alias `connect`, same handler, no separate guard verb) — live guard status (pid, expiry, secret count, admission state, pre-admit-pending state) or the last session's honest death report
 - `run`/`list`/`lock`/`status`/`connect` accept `--name LABEL` — display-only client label shown in the guard's admission prompt (see "Admission consent" above); never a trust input
@@ -413,4 +573,4 @@ The guard and helper IPC replies expose only: status, scrubbed stdout/stderr, ex
 
 ## Testing
 
-Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); kernel-verified-peer admission-consent prompt approves/denies/times out, an unavailable peer identity (`peer=None`) always fails closed rather than falling back to the legacy path, an admitted peer skips re-prompting, a real OS descendant of an admitted peer is silently in-tree while an unrelated peer is not and re-prompts, secret-scoped grants allow already-granted secrets without re-prompting and re-prompt (allow or deny) to expand scope for a new one, unscoped grants never re-prompt, `--pre-admit` consumes its single-use window for the next unrecognized peer (unscoped or scoped to specific secrets) and falls back to a normal prompt once expired, `status` reports admission state and pending pre-admit (`test_guard_admission.py`); the pre-0.3.8 in-memory opaque-token fallback path (`_PEER_UNSET`, no `peer` kwarg supplied) still approves/denies/re-prompts exactly as before, purely for callers that predate kernel identity (`test_guard_admission_legacy.py`); real spawned-process E2E security tests — an unrelated spawned process is never silently admitted, a genuine child process of an admitted process is silently in-tree without a prompt (`test_peer_identity_e2e.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising, automatically covers `setup` (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`); secret-guard hook blocks every known prefix (OpenAI/Anthropic/AWS/GitHub/GitLab/Slack/Google/Stripe/npm) and high-entropy assignments, allows placeholder assignments (`PASSWORD=test123`), bare mentions, comments, and `ka run`/`ka set` command lines, host detection (Claude vs Cursor payload shape) picks the right deny contract, disable env skips everything, fails open on malformed/empty/non-dict stdin (`test_secret_guard.py`); `ka setup` copies all three skills to both hosts with matching content, overwrites stale copies on rerun, `--skills-only`/`--hook-only` isolate each half, Claude `settings.json` / Cursor `hooks.json` merges preserve unrelated keys and other hooks and are idempotent on rerun, malformed settings recover to a fresh merge, PATH check reports found/not-found via monkeypatched `shutil.which` (`test_setup_cmd.py`); a real wheel build (`pip wheel`) contains all three packaged `SKILL.md` files and the hook module (`test_package_skills_data.py`); the extend-prompt and idle-time reminder both fire on an idle guard parked inside a never-returning `listener.accept()` — not just when a client happens to connect — and an accepted extend actually pushes `expires_at` out (`test_guard_extend_prompt.py`); the startup banner shows the expiry clock and how to stop early, and the periodic reminder backs off once inside the extend window (`test_guard_startup_banner.py`); `ka set`'s value never appears in the caller's own terminal, is reachable only via `PromptRequest.mutation` and not `detail`, and the isolated spawned-console helper still previews it before applying the mutation (`test_set_never_prints_value.py`); guard reload picks up a `set` made while unlocked on the very next `run`/`list`/`status`, a `remove` makes a secret disappear the same way, reload is driven by the vault's content fingerprint (not a fixed poll interval or a new verb), and the guard never returns a raw secret value across a reload (`test_guard_reload.py`); dotenv parsing (quoted/unquoted values, `export`, comments), collision merge defaulting to skip vs. an explicit overwrite callback, minimal `amnesia.toml` generation and no-duplicate merge, the `.gitignore` offer (never silent, no-ops if already covered), and the delete/double-confirm/rename/keep source-file state machine, all as pure functions with injected yes/no callbacks (`test_dotenv_import.py`); `ka import` end-to-end — TTY-only refusal, missing file, no-vault refusal, wrong password denied, an empty file is a no-op, a happy path merges new names into the vault while leaving existing ones untouched and writes both `.gitignore` and `amnesia.toml`, a name collision defaults to skip and only overwrites on explicit confirm, delete/rename/keep are all reachable via prompt answers, and no secret value is ever printed to the terminal (`test_import_cmd.py`); project manifest load (canonical `[secrets.NAME]` + legacy `[[secret]]`), `ka check` / `ka check --json` against the project names sidecar only (no decrypt, no global; missing required → non-zero; no manifest → OK; no project → fail), and `ka run` preflight refusal listing missing required secrets before inject (`test_manifest.py`).
+Vault round-trip / wrong password / tamper; obsolete browser-fill key migration on load (one-time notice only when `logins` was non-empty, silent drop otherwise, save-side persists the cleanup without a second notice) (`test_vault_migration.py`); `init` mismatch creates nothing, match creates an unlockable vault, refuses if a vault already exists; `set` refuses when no vault exists yet; `passwd` happy path re-encrypts with a fresh salt, refuses while guard alive, mismatch aborts, wrong current password aborts, TTY-only (`test_passwd_cmd.py`); scrubbing on both per-call and guard paths; crafted IPC client never gets raw values; guard verb set regression (`{run,list,lock,status,renew}` only, admission pre-seeded so verb dispatch itself is under test); cached-session `run` executes in the caller's cwd (threaded through the IPC message); kernel-verified-peer admission-consent prompt approves/denies/times out, an unavailable peer identity (`peer=None`) always fails closed rather than falling back to the legacy path, an admitted peer skips re-prompting, a real OS descendant of an admitted peer is silently in-tree while an unrelated peer is not and re-prompts, secret-scoped grants allow already-granted secrets without re-prompting and re-prompt (allow or deny) to expand scope for a new one, unscoped grants never re-prompt, `--pre-admit` consumes its single-use window for the next unrecognized peer (unscoped or scoped to specific secrets) and falls back to a normal prompt once expired, `status` reports admission state and pending pre-admit (`test_guard_admission.py`); the pre-0.3.8 in-memory opaque-token fallback path (`_PEER_UNSET`, no `peer` kwarg supplied) still approves/denies/re-prompts exactly as before, purely for callers that predate kernel identity (`test_guard_admission_legacy.py`); real spawned-process E2E security tests — an unrelated spawned process is never silently admitted, a genuine child process of an admitted process is silently in-tree without a prompt (`test_peer_identity_e2e.py`); honest death reporting for `locked`/`expired`/`interrupted`/`crashed: <ExcType>`, `format_no_guard_message()` phrasing, guard prints its live status banner on start (`test_guard_death_reporting.py`); foreground unlock never spawns a subprocess, a spawned helper console refuses the `unlock` action with a clear reason instead of trying to start anything (`test_foreground_unlock.py`); argparse `--help` walk over the root parser and every subparser renders on a simulated cp1252 console without raising, automatically covers `setup` (`test_argparse_help_cp1252.py`); `isatty=False` asserts `CREATE_NEW_CONSOLE`, bare argv, env handoff; password never in IPC; inline password prompts fail closed on a bounded timeout instead of hanging when `isatty()` is fooled by a tty-shaped-but-unattended stream; reveal/copy non-interactive returns status only; helper parent-death cancels; unlock→run→lock→fallback; reveal/copy ignore live guard; config/remove/`set` need password; audit with no plaintext; `--help` (including `init`); scrubber uses replace not regex; Linux emulator selection order and env/argv handoff, immediate-exit fallthrough to the next emulator, headless and no-emulator fail-closed, macOS/other-platform fail-closed (`test_posix.py`); themed output respects `NO_COLOR` and non-TTY streams, ASCII glyph fallback, scrubbed/revealed values stay unstyled, degrades non-cp1252-encodable caller text instead of crashing (`test_theme.py`); secret-guard hook blocks every known prefix (OpenAI/Anthropic/AWS/GitHub/GitLab/Slack/Google/Stripe/npm) and high-entropy assignments, allows placeholder assignments (`PASSWORD=test123`), bare mentions, comments, and `ka run`/`ka set` command lines, host detection (Claude vs Cursor payload shape) picks the right deny contract, disable env skips everything, fails open on malformed/empty/non-dict stdin (`test_secret_guard.py`); `ka setup` copies all three skills to both hosts with matching content, overwrites stale copies on rerun, `--skills-only`/`--hook-only` isolate each half, Claude `settings.json` / Cursor `hooks.json` merges preserve unrelated keys and other hooks and are idempotent on rerun, malformed settings recover to a fresh merge, PATH check reports found/not-found via monkeypatched `shutil.which` (`test_setup_cmd.py`); a real wheel build (`pip wheel`) contains all three packaged `SKILL.md` files and the hook module (`test_package_skills_data.py`); the extend-prompt and idle-time reminder both fire on an idle guard parked inside a never-returning `listener.accept()` — not just when a client happens to connect — and an accepted extend actually pushes `expires_at` out (`test_guard_extend_prompt.py`); the startup banner shows the expiry clock and how to stop early, and the periodic reminder backs off once inside the extend window (`test_guard_startup_banner.py`); `ka set`'s value never appears in the caller's own terminal, is reachable only via `PromptRequest.mutation` and not `detail`, and the isolated spawned-console helper still previews it before applying the mutation (`test_set_never_prints_value.py`); guard reload picks up a `set` made while unlocked on the very next `run`/`list`/`status`, a `remove` makes a secret disappear the same way, reload is driven by the vault's content fingerprint (not a fixed poll interval or a new verb), and the guard never returns a raw secret value across a reload (`test_guard_reload.py`); dotenv parsing (quoted/unquoted values, `export`, comments), collision merge defaulting to skip vs. an explicit overwrite callback, minimal `amnesia.toml` generation and no-duplicate merge, the `.gitignore` offer (never silent, no-ops if already covered), and the delete/double-confirm/rename/keep source-file state machine, all as pure functions with injected yes/no callbacks (`test_dotenv_import.py`); `ka import` end-to-end — TTY-only refusal, missing file, no-vault refusal, wrong password denied, an empty file is a no-op, a happy path merges new names into the vault while leaving existing ones untouched and writes both `.gitignore` and `amnesia.toml`, a name collision defaults to skip and only overwrites on explicit confirm, delete/rename/keep are all reachable via prompt answers, and no secret value is ever printed to the terminal (`test_import_cmd.py`); project manifest load (canonical `[secrets.NAME]` + legacy `[[secret]]`), `ka check` / `ka check --json` against the project names sidecar only (no decrypt, no global; missing required → non-zero; no manifest → OK; no project → fail), and `ka run` preflight refusal listing missing required secrets before inject (`test_manifest.py`); KAM2 roles — real KAM1 fixture migrates with verified `.kam1.bak` decrypt before live rewrite, confirm-decline leaves KAM1 untouched, runner identity denies `reveal`, `export --for` includes only the target member's ACL'd secrets (wrong sk cannot open), `member remove` warns to rotate, users who never enable roles stay on KAM1, ACL signature tamper detected (`test_roles_export.py`; throwaway `KEY_AMNESIA_HOME` only).

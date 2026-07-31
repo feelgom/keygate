@@ -476,6 +476,19 @@ def run_prompt_helper() -> int:
                 }
                 action = request.action
 
+                # Role policy (KAM2): runner cannot reveal/copy.
+                # Classification: policy vs human; effective vs agent.
+                if action in ("reveal", "copy", "set", "remove"):
+                    from key_amnesia import roles as roles_mod
+
+                    role = roles_mod.role_for_identity(
+                        payload, roles_mod.load_identity()
+                    )
+                    if not roles_mod.policy_allows(action, role):
+                        assert role is not None
+                        reply["reason"] = roles_mod.deny_reason(action, role)
+                        action = "__denied__"
+
                 if action == "run":
                     missing = [n for n in request.secret_names if n not in secrets_map]
                     if missing:
