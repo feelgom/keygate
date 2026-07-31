@@ -37,7 +37,11 @@ from key_amnesia import peer_identity
 from key_amnesia import theme
 from key_amnesia import vault as vault_mod
 from key_amnesia.audit import audit_event
-from key_amnesia.paths import guard_lock_path, last_guard_state_path
+from key_amnesia.paths import (
+    guard_lock_path,
+    guards_registry_dir,
+    last_guard_state_path,
+)
 from key_amnesia.peer_identity import PeerIdentity
 from key_amnesia.run_exec import run_with_secrets
 
@@ -107,6 +111,20 @@ class AdmittedSession:
 
 
 @dataclass
+class VaultSource:
+    """One on-disk vault contributing to a (possibly merged) guard view.
+
+    `key` is the derived SecretBox key only — never the master password.
+    Sources are ordered low→high precedence; later sources win on name
+    collision when rebuilding `state.secrets` (global then project).
+    """
+
+    path: Path
+    key: bytes
+    fingerprint: str | None = None
+
+
+@dataclass
 class GuardState:
     secrets: dict[str, str]
     expires_at: float  # epoch seconds
@@ -132,6 +150,10 @@ class GuardState:
     # DESIGN.md "Derived key retained in guard memory".
     vault_key: bytes | None = None
     vault_content_fingerprint: str | None = None
+    # Multi-vault merge (project + global): when set, `_maybe_reload_secrets`
+    # fingerprints *every* source. Singular vault_path/vault_key remain for
+    # single-vault callers and tests.
+    vault_sources: list[VaultSource] | None = None
     # Opt-in, single-use pre-admit window (`ka unlock --pre-admit`) — see
     # `_check_admission`. `pre_admit_until` is cleared (set back to None)
     # the moment it is consumed by the first unrecognized peer, whether or
@@ -189,8 +211,12 @@ def clear_guard_lock(path: Path | None = None) -> None:
         pass
 
 
-def guard_is_alive(lock: dict[str, Any] | None = None) -> bool:
-    lock = lock if lock is not None else read_guard_lock()
+def guard_is_alive(
+    lock: dict[str, Any] | None = None,
+    *,
+    path: Path | None = None,
+) -> bool:
+    lock = lock if lock is not None else read_guard_lock(path=path)
     if not lock:
         return False
     pid = int(lock.get("pid") or 0)
@@ -204,8 +230,12 @@ def guard_is_alive(lock: dict[str, Any] | None = None) -> bool:
     return parent_alive(pid)
 
 
-def connect_guard(lock: dict[str, Any] | None = None) -> Connection | None:
-    lock = lock if lock is not None else read_guard_lock()
+def connect_guard(
+    lock: dict[str, Any] | None = None,
+    *,
+    path: Path | None = None,
+) -> Connection | None:
+    lock = lock if lock is not None else read_guard_lock(path=path)
     if not lock or not guard_is_alive(lock):
         return None
     try:
@@ -215,7 +245,12 @@ def connect_guard(lock: dict[str, Any] | None = None) -> Connection | None:
         return None
 
 
-def guard_request(msg: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] | None:
+def guard_request(
+    msg: dict[str, Any],
+    timeout: float = 30.0,
+    *,
+    lock_path: Path | None = None,
+) -> dict[str, Any] | None:
     """Send a message to the live guard; return response or None.
 
     Since 0.3.8 the client attaches nothing admission-related — the guard
@@ -225,7 +260,7 @@ def guard_request(msg: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] 
     `--name` / `KEY_AMNESIA_CLIENT_NAME`), defaulted here from the
     environment so every guard-talking command picks it up automatically.
     """
-    conn = connect_guard()
+    conn = connect_guard(path=lock_path)
     if conn is None:
         return None
     out = dict(msg)
@@ -582,20 +617,52 @@ def _check_admission_legacy(
 
 
 def _maybe_reload_secrets(state: GuardState) -> None:
-    """Re-open the vault if its on-disk content changed since we last looked.
+    """Re-open vault file(s) if on-disk content changed since we last looked.
 
     Fixes the guard's stale in-memory snapshot: `ka set` / `ka remove` from
     another terminal write the vault file directly, but a long-running `ka
     unlock` guard used to decrypt once at startup and never look again (see
     README security limit 9 / DESIGN.md). Cheap content fingerprint first —
-    only re-opens the vault (SecretBox decrypt with the already-derived key,
-    no Argon2id, no password prompt) when that fingerprint actually moved.
+    only re-opens (SecretBox decrypt with the already-derived key, no
+    Argon2id, no password prompt) when that fingerprint actually moved.
 
-    No-ops when the state was built without vault_path/vault_key (every
+    When `state.vault_sources` is set (project+global merge), every source
+    is fingerprinted and reloaded independently; secrets are rebuilt with
+    later sources winning on name collision. Singular vault_path/vault_key
+    remain the single-vault path.
+
+    No-ops when the state was built without vault backing (every
     guard-dispatch test constructs `GuardState` directly with just an
-    in-memory `secrets` dict and no backing vault file — those must keep
-    working unchanged).
+    in-memory `secrets` dict — those must keep working unchanged).
     """
+    if state.vault_sources:
+        changed = False
+        for src in state.vault_sources:
+            current = vault_mod.vault_fingerprint(src.path)
+            if current is None:
+                continue
+            if current != src.fingerprint:
+                changed = True
+                break
+        if not changed:
+            return
+        merged: dict[str, str] = {}
+        for src in state.vault_sources:
+            current = vault_mod.vault_fingerprint(src.path)
+            if current is None:
+                # Keep last fingerprint; skip this source's update this pass.
+                continue
+            try:
+                payload = vault_mod.load_vault_with_retained_key(src.path, src.key)
+            except vault_mod.VaultError:
+                continue
+            merged.update(
+                {k: str(v) for k, v in payload.get("secrets", {}).items()}
+            )
+            src.fingerprint = current
+        state.secrets = merged
+        return
+
     if state.vault_path is None or state.vault_key is None:
         return
     current = vault_mod.vault_fingerprint(state.vault_path)
@@ -610,6 +677,89 @@ def _maybe_reload_secrets(state: GuardState) -> None:
         return
     state.secrets = {k: str(v) for k, v in payload.get("secrets", {}).items()}
     state.vault_content_fingerprint = current
+
+
+# --- guard registry (discovery only; never authkey) -------------------------
+
+
+def _registry_key_for_vault(vault_path: Path | str) -> str:
+    import hashlib
+
+    resolved = str(Path(vault_path).resolve())
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:32]
+
+
+def write_guard_registry_entry(
+    *,
+    vault_path: Path | str,
+    address: str,
+    pid: int,
+    expires_at: float,
+    project_root: str | None = None,
+    env_name: str | None = None,
+) -> Path:
+    """Write a discovery-only registry entry. Never stores authkey."""
+    key = _registry_key_for_vault(vault_path)
+    d = guards_registry_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{key}.json"
+    data = {
+        "vault_path": str(Path(vault_path).resolve()),
+        "project_root": project_root,
+        "env": env_name,
+        "pid": pid,
+        "expires_at": _utc_iso(expires_at),
+        "expires_at_epoch": expires_at,
+        "address": address,
+        # authkey intentionally omitted — stays only in vault-adjacent lock
+    }
+    p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return p
+
+
+def remove_guard_registry_entry(vault_path: Path | str) -> None:
+    key = _registry_key_for_vault(vault_path)
+    p = guards_registry_dir() / f"{key}.json"
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def list_guard_registry_entries() -> list[dict[str, Any]]:
+    """Return live registry entries; drop stale ones."""
+    from key_amnesia.prompt_route import parent_alive
+
+    d = guards_registry_dir()
+    if not d.is_dir():
+        return []
+    live: list[dict[str, Any]] = []
+    for p in d.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid = int(data.get("pid") or 0)
+        expires = float(data.get("expires_at_epoch") or 0)
+        stale = False
+        if expires and time.time() > expires:
+            stale = True
+        elif pid <= 0 or not parent_alive(pid):
+            stale = True
+        if stale:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
+        live.append(data)
+    return live
 
 
 # --- verb dispatch ----------------------------------------------------------
@@ -974,6 +1124,11 @@ def run_foreground_guard(
     *,
     vault_path: Path | str | None = None,
     vault_key: bytes | None = None,
+    vault_sources: list[VaultSource] | None = None,
+    lock_path: Path | None = None,
+    last_guard_state_path: Path | None = None,
+    project_root: str | None = None,
+    env_name: str | None = None,
     pre_admit: bool = False,
     pre_admit_secrets: list[str] | None = None,
     pre_admit_seconds: int = 900,
@@ -992,6 +1147,15 @@ def run_foreground_guard(
     `_maybe_reload_secrets`. Omitting them (as every existing test does)
     keeps the old fixed-at-startup-only behavior.
 
+    `vault_sources` (optional) enables a merged project+global view: each
+    source is fingerprinted independently; later sources win on name
+    collision. When provided, `payload["secrets"]` should already be the
+    merged map (caller builds it).
+
+    Registry write/remove runs **only** when `vault_path` is explicitly
+    passed (or derived from `vault_sources`) — tests that call this without
+    a vault path must not touch real `~/.key-amnesia/guards/`.
+
     `pre_admit` (opt-in, never the default) arms a single-use grant for the
     very next unrecognized peer within `pre_admit_seconds` — scoped to
     `pre_admit_secrets` if given, else unscoped ALL secrets. Must be loud:
@@ -1002,10 +1166,24 @@ def run_foreground_guard(
     expires_at = time.time() + timeout_minutes * 60
     listener, address, authkey = ipc.start_listener()
     pid = os.getpid()
-    vp = Path(vault_path) if vault_path is not None else None
-    fingerprint = (
-        vault_mod.vault_fingerprint(vp) if vp is not None and vault_key is not None else None
-    )
+
+    sources = list(vault_sources) if vault_sources else None
+    if sources:
+        for src in sources:
+            if src.fingerprint is None:
+                src.fingerprint = vault_mod.vault_fingerprint(src.path)
+        vp = sources[-1].path  # primary (highest precedence) vault
+        vkey = sources[-1].key
+        fingerprint = sources[-1].fingerprint
+    else:
+        vp = Path(vault_path) if vault_path is not None else None
+        vkey = vault_key
+        fingerprint = (
+            vault_mod.vault_fingerprint(vp)
+            if vp is not None and vault_key is not None
+            else None
+        )
+
     state = GuardState(
         secrets=secrets_map,
         expires_at=expires_at,
@@ -1013,8 +1191,9 @@ def run_foreground_guard(
         authkey=authkey,
         pid=pid,
         vault_path=vp,
-        vault_key=vault_key,
+        vault_key=vkey,
         vault_content_fingerprint=fingerprint,
+        vault_sources=sources,
     )
     if pre_admit:
         scoped_names = set(pre_admit_secrets or ())
@@ -1043,7 +1222,37 @@ def run_foreground_guard(
                 result="warn",
                 reason="scope: ALL (unscoped pre-admit)",
             )
-    write_guard_lock(address, authkey, pid, expires_at)
+
+    # Lock / last-state beside the active vault when paths are supplied;
+    # otherwise fall back to the global defaults (existing tests).
+    effective_lock = lock_path
+    if effective_lock is None and vp is not None:
+        from key_amnesia.paths import guard_lock_path_for_vault
+
+        effective_lock = guard_lock_path_for_vault(vp)
+    effective_last = last_guard_state_path
+    if effective_last is None and vp is not None:
+        from key_amnesia.paths import last_guard_state_path_for_vault
+
+        effective_last = last_guard_state_path_for_vault(vp)
+
+    write_guard_lock(address, authkey, pid, expires_at, path=effective_lock)
+
+    # Registry only when vault_path was explicitly provided (or via sources).
+    registry_vault: Path | None = vp
+    if registry_vault is not None:
+        try:
+            write_guard_registry_entry(
+                vault_path=registry_vault,
+                address=address,
+                pid=pid,
+                expires_at=expires_at,
+                project_root=project_root,
+                env_name=env_name,
+            )
+        except OSError:
+            pass
+
     started_at = state.created_at
 
     theme.success(
@@ -1071,9 +1280,16 @@ def run_foreground_guard(
         reason = f"crashed: {type(exc).__name__}"
         theme.error(f"Guard crashed: {exc}")
     finally:
-        _write_last_guard_state(reason, started_at, state.request_count)
+        _write_last_guard_state(
+            reason, started_at, state.request_count, path=effective_last
+        )
         state.secrets.clear()
-        clear_guard_lock()
+        clear_guard_lock(path=effective_lock)
+        if registry_vault is not None:
+            try:
+                remove_guard_registry_entry(registry_vault)
+            except OSError:
+                pass
         try:
             listener.close()
         except Exception:
