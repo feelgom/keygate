@@ -1,0 +1,46 @@
+# Wiki drafts (GitHub Wiki publish)
+
+These markdown files are **first drafts** for the live GitHub wiki at
+[https://github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki).
+
+They are kept in-repo so PRs can review IA and wording before (or instead of)
+pushing to the separate wiki git remote. `ka docs` always opens/prints that
+wiki URL — not these paths.
+
+## Publish
+
+Option A — copy pages into the wiki remote:
+
+```bash
+git clone https://github.com/fujitoid/key-amnesia.wiki.git
+# copy *.md from this directory (except this README.md) into the clone
+# commit + push on the wiki repo
+```
+
+Option B — treat this tree as the source of truth and sync periodically.
+
+GitHub wiki page titles come from filenames (`Home.md` → Home,
+`Why-not-dotenv.md` → Why not dotenv). `_Sidebar.md` renders the left nav.
+
+## Proposed IA
+
+| Page | Purpose |
+|------|---------|
+| [Home](Home.md) | Pitch + links; why agents need a vault |
+| [Why-not-dotenv](Why-not-dotenv.md) | `.env` / LEAK framing |
+| [Install](Install.md) | pip, `ka setup`, agent bootstrap |
+| [Quickstart-migration](Quickstart-migration.md) | `ka import` → `ka scan` → `ka run` |
+| [Project-vaults](Project-vaults.md) | `.amnesia/`, merge, `--env` |
+| [Manifest-and-check](Manifest-and-check.md) | `amnesia.toml`, `ka check`, CI |
+| [Guard-and-admission](Guard-and-admission.md) | unlock, peer identity, pre-admit |
+| [Commands](Commands.md) | Command reference skeleton |
+| [Roles-and-export](Roles-and-export.md) | KAM2 / export — **needs maintainer judgement** |
+| [Threat-model](Threat-model.md) | Limits + policy vs crypto — **needs maintainer judgement** |
+| [macOS](macOS.md) | Experimental / not yet implemented |
+
+## Maintainer judgement flags
+
+Do **not** treat Roles-and-export or Threat-model as final public wording until
+a human maintainer reviews policy-vs-crypto labels (especially runner =
+policy vs human / effective vs agent, Windows peer identity strength, and
+admin signature = tamper-evident only).
