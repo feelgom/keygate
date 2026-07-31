@@ -14,14 +14,17 @@ from typing import Any
 from key_amnesia import __version__
 from key_amnesia import crypto
 from key_amnesia import dotenv_import
+from key_amnesia import manifest as manifest_mod
 from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
 from key_amnesia.project import (
     VaultContext,
     ensure_project_scaffold,
+    find_project_root,
     merge_secret_maps,
     merged_names_from_sidecars,
+    project_vault_path,
     resolve_vault_context,
 )
 from key_amnesia.prompt_route import PromptRequest, require_human_auth
@@ -32,6 +35,7 @@ from key_amnesia.vault import (
     empty_payload,
     load_vault,
     load_vault_with_key,
+    names_path_for_vault,
     read_names,
     save_vault,
 )
@@ -148,6 +152,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_import.add_argument("file", help="Path to a dotenv-format file, e.g. .env")
     _add_vault_scope_args(p_import)
+
+    # check (CI: project manifest vs project names sidecar — no decrypt)
+    p_check = sub.add_parser(
+        "check",
+        help=(
+            "Check amnesia.toml required secrets against the project names "
+            "sidecar (no decrypt, no global vault; for CI)"
+        ),
+    )
+    p_check.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text",
+    )
+    _add_vault_scope_args(p_check)
 
     # run
     p_run = sub.add_parser(
@@ -603,6 +622,74 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """``ka check``: project ``amnesia.toml`` vs project names sidecar only.
+
+    No decrypt, no global vault. Non-zero exit when required secrets are
+    missing or the manifest is malformed. Designed for CI::
+
+        ka check
+        ka check --json
+    """
+    root = find_project_root()
+    if root is None:
+        msg = (
+            "ka check requires a project vault (.amnesia/). "
+            "Run 'ka init --project' first, or cd into the project."
+        )
+        if args.json:
+            theme.out(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "manifest": None,
+                        "names_path": None,
+                        "required": [],
+                        "present": [],
+                        "missing": [],
+                        "optional_absent": [],
+                        "error": msg,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        else:
+            theme.error(msg)
+        return 1
+
+    # Resolve env the same way as other commands, but force no-global so the
+    # names path is always the project sidecar.
+    try:
+        ctx = resolve_vault_context(
+            env=getattr(args, "env", None),
+            no_global=True,
+            start=root,
+        )
+        names_path = (
+            ctx.names_path
+            if ctx.project_root is not None
+            else names_path_for_vault(
+                project_vault_path(root, getattr(args, "env", None))
+            )
+        )
+    except ValueError as e:
+        theme.error(f"Error: {e}")
+        return 1
+
+    result = manifest_mod.check_project(root, names_path=names_path)
+
+    if args.json:
+        theme.out(manifest_mod.format_check_json(result))
+    else:
+        text = manifest_mod.format_check_human(result)
+        if result.ok:
+            theme.out(text)
+        else:
+            theme.error(text)
+    return 0 if result.ok else 1
+
+
 def _load_merged_secrets(
     ctx: VaultContext,
     password: str,
@@ -652,6 +739,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not secret_names:
         theme.error("At least one --secret or --as is required.")
         return 2
+
+    # Project manifest gate: fail before inject if required secrets are absent
+    # from the injectable name set (sidecars only — no decrypt).
+    if ctx.project_root is not None:
+        mpath = manifest_mod.manifest_path_for(ctx.project_root)
+        if mpath.exists():
+            try:
+                man = manifest_mod.load_manifest(mpath)
+            except ValueError as e:
+                theme.error(f"Error reading amnesia.toml: {e}")
+                return 1
+            if ctx.merge_with_global:
+                present = set(merged_names_from_sidecars(ctx))
+            else:
+                present = set(read_names(ctx.names_path))
+            pre = manifest_mod.check_against_names(
+                man, present, names_path=ctx.names_path
+            )
+            if pre.missing:
+                theme.error(manifest_mod.missing_required_message(pre.missing))
+                return 1
 
     # Try live guard first (cached mode).
     from key_amnesia.guard import guard_is_alive, guard_request
@@ -1154,6 +1262,7 @@ def main(argv: list[str] | None = None) -> int:
         "set": cmd_set,
         "remove": cmd_remove,
         "import": cmd_import,
+        "check": cmd_check,
         "run": cmd_run,
         "list": cmd_list,
         "unlock": cmd_unlock,

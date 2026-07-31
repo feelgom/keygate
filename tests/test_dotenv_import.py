@@ -78,33 +78,49 @@ def test_generate_manifest_creates_minimal_entries(tmp_path: Path) -> None:
     manifest = generate_or_merge_manifest(["API_KEY", "DB_PASSWORD"], tmp_path)
     assert manifest == tmp_path / "amnesia.toml"
     text = manifest.read_text(encoding="utf-8")
-    assert text.count("[[secret]]") == 2
-    assert 'name = "API_KEY"' in text
+    assert "[secrets.API_KEY]" in text
+    assert "[secrets.DB_PASSWORD]" in text
     assert 'env = "API_KEY"' in text
     assert "required = true" in text
     assert 'description = ""' in text
-    assert 'name = "DB_PASSWORD"' in text
+    assert "[[secret]]" not in text
+    assert 'name = "API_KEY"' not in text
 
 
 def test_generate_manifest_merges_without_duplicating(tmp_path: Path) -> None:
     manifest_path = tmp_path / "amnesia.toml"
     manifest_path.write_text(
-        '[[secret]]\nname = "EXISTING"\nrequired = true\ndescription = ""\nenv = "EXISTING"\n',
+        '[secrets.EXISTING]\nrequired = true\ndescription = ""\nenv = "EXISTING"\n',
         encoding="utf-8",
     )
     generate_or_merge_manifest(["EXISTING", "NEW_ONE"], tmp_path)
     text = manifest_path.read_text(encoding="utf-8")
     assert text.count('env = "EXISTING"') == 1
     assert text.count('env = "NEW_ONE"') == 1
-    assert text.count("[[secret]]") == 2
+    assert "[secrets.EXISTING]" in text
+    assert "[secrets.NEW_ONE]" in text
 
 
 def test_generate_manifest_noop_when_all_present(tmp_path: Path) -> None:
     manifest_path = tmp_path / "amnesia.toml"
-    original = '[[secret]]\nname = "A"\nrequired = true\ndescription = ""\nenv = "A"\n'
+    original = '[secrets.A]\nrequired = true\ndescription = ""\nenv = "A"\n'
     manifest_path.write_text(original, encoding="utf-8")
     generate_or_merge_manifest(["A"], tmp_path)
     assert manifest_path.read_text(encoding="utf-8") == original
+
+
+def test_generate_manifest_merges_onto_legacy_without_duplicating(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "amnesia.toml"
+    manifest_path.write_text(
+        '[[secret]]\nname = "LEGACY"\nrequired = true\ndescription = ""\nenv = "LEGACY"\n',
+        encoding="utf-8",
+    )
+    generate_or_merge_manifest(["LEGACY", "NEW"], tmp_path)
+    text = manifest_path.read_text(encoding="utf-8")
+    assert text.count("LEGACY") >= 1
+    assert "[secrets.NEW]" in text
+    # Did not append a second LEGACY block.
+    assert "[secrets.LEGACY]" not in text
 
 
 def test_offer_gitignore_added_on_yes(tmp_path: Path) -> None:
