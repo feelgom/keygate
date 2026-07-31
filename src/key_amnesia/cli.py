@@ -349,6 +349,86 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only merge the hook config; skip installing skills",
     )
 
+    # identity (local X25519 keypair for KAM2 membership)
+    p_ident = sub.add_parser(
+        "identity",
+        help="Create or show the local keypair used for KAM2 membership",
+    )
+    ident_sub = p_ident.add_subparsers(dest="identity_command")
+    p_ident_create = ident_sub.add_parser(
+        "create", help="Generate a local identity (prints pubkey for ka member add)"
+    )
+    p_ident_create.add_argument(
+        "--label", default="", help="Optional display label stored with the identity"
+    )
+    ident_sub.add_parser("show", help="Show local identity pubkey (never the private key)")
+
+    # member (KAM2 roles — first add migrates KAM1->KAM2 with confirmed backup)
+    p_member = sub.add_parser(
+        "member",
+        help="Manage vault members/roles (first add enables KAM2; confirmed migration)",
+    )
+    member_sub = p_member.add_subparsers(dest="member_command")
+    p_member_add = member_sub.add_parser(
+        "add", help="Add a member by pubkey (triggers KAM1->KAM2 on first enable)"
+    )
+    p_member_add.add_argument("name", help="Member display name")
+    p_member_add.add_argument(
+        "--pubkey", required=True, metavar="HEX", help="Member X25519 public key (hex)"
+    )
+    p_member_add.add_argument(
+        "--role",
+        required=True,
+        choices=["admin", "writer", "runner"],
+        help="admin / writer / runner",
+    )
+    p_member_add.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm KAM1->KAM2 upgrade without an interactive prompt",
+    )
+    _add_vault_scope_args(p_member_add)
+    p_member_list = member_sub.add_parser("list", help="List members (names/roles/pubkeys)")
+    _add_vault_scope_args(p_member_list)
+    p_member_rm = member_sub.add_parser(
+        "remove", help="Remove a member (warns to rotate secrets they could unwrap)"
+    )
+    p_member_rm.add_argument("name", help="Member display name")
+    _add_vault_scope_args(p_member_rm)
+
+    # grant / revoke (ACL)
+    p_grant = sub.add_parser(
+        "grant", help="Grant a secret to a member (KAM2 ACL; cryptographic wraps)"
+    )
+    p_grant.add_argument("secret", help="Secret name")
+    p_grant.add_argument("--to", required=True, metavar="MEMBER", help="Member name")
+    _add_vault_scope_args(p_grant)
+    p_revoke = sub.add_parser("revoke", help="Revoke a secret from a member (KAM2 ACL)")
+    p_revoke.add_argument("secret", help="Secret name")
+    p_revoke.add_argument("--from", dest="member", required=True, metavar="MEMBER")
+    _add_vault_scope_args(p_revoke)
+
+    # export
+    p_export = sub.add_parser(
+        "export",
+        help="Export ciphertext for one member (only their ACL'd secrets)",
+    )
+    p_export.add_argument(
+        "--for",
+        dest="member",
+        required=True,
+        metavar="MEMBER",
+        help="Member name to export for",
+    )
+    p_export.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Output path (default: <member>.kamx)",
+    )
+    _add_vault_scope_args(p_export)
+
     # internal helper (still supports --help; omitted from epilog summary)
     sub.add_parser("_prompt-helper", help=argparse.SUPPRESS)
 
@@ -451,6 +531,40 @@ def _auth_password(request: PromptRequest) -> tuple[bool, str | None, Any]:
     if not outcome.ok:
         return False, None, outcome
     return True, outcome.password, outcome
+
+
+def _check_role_policy(vault: Path, password: str, action: str) -> int | None:
+    """Return an exit code if the local identity's role denies ``action``.
+
+    Classification: **policy** vs a determined human with the master password;
+    **effective** vs an agent using a runner identity. Returns None when allowed.
+    """
+    from key_amnesia import roles
+
+    try:
+        payload = load_vault(vault, password)
+    except VaultError:
+        return None  # caller will surface the vault error on its own path
+    role = roles.role_for_identity(payload, roles.load_identity())
+    if roles.policy_allows(action, role):
+        return None
+    assert role is not None
+    theme.error(roles.deny_reason(action, role))
+    audit_event(
+        action,
+        route="inline",
+        result="denied",
+        reason=f"role policy: {role}",
+    )
+    return 1
+
+
+def _yes_no(prompt: str) -> bool:
+    try:
+        answer = input(f"{prompt} [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
 
 
 def cmd_set(args: argparse.Namespace) -> int:
@@ -1281,6 +1395,9 @@ def cmd_reveal(args: argparse.Namespace) -> int:
         return 1
 
     if password is not None:
+        denied = _check_role_policy(ctx.vault_path, password, "reveal")
+        if denied is not None:
+            return denied
         try:
             payload = load_vault(ctx.vault_path, password)
         except VaultError as e:
@@ -1319,6 +1436,9 @@ def cmd_copy(args: argparse.Namespace) -> int:
         return 1
 
     if password is not None:
+        denied = _check_role_policy(ctx.vault_path, password, "copy")
+        if denied is not None:
+            return denied
         from key_amnesia.clipboard import copy_to_clipboard
 
         try:
@@ -1522,6 +1642,334 @@ def cmd_passwd(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_identity(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    sub = getattr(args, "identity_command", None)
+    if sub == "create":
+        existing = roles.load_identity()
+        if existing is not None:
+            theme.error(
+                "Identity already exists. Remove identity.json manually to rotate "
+                f"(pubkey={existing.get('box_pk')})."
+            )
+            return 1
+        record = roles.create_identity(label=getattr(args, "label", "") or "")
+        theme.success("Local identity created.")
+        theme.out(f"pubkey: {record['box_pk']}")
+        theme.info("Give this pubkey to a vault admin: ka member add NAME --pubkey ... --role ...")
+        return 0
+    if sub == "show" or sub is None:
+        record = roles.load_identity()
+        if record is None:
+            theme.info("No local identity. Run: ka identity create")
+            return 1
+        theme.out(f"label: {record.get('label') or '(none)'}")
+        theme.out(f"pubkey: {record['box_pk']}")
+        theme.out(f"created_at: {record.get('created_at', '')}")
+        return 0
+    theme.error("Usage: ka identity [create|show]")
+    return 2
+
+
+def cmd_member(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    sub = getattr(args, "member_command", None)
+    if sub == "list":
+        return _cmd_member_list(args)
+    if sub == "add":
+        return _cmd_member_add(args)
+    if sub == "remove":
+        return _cmd_member_remove(args)
+    theme.error("Usage: ka member [add|list|remove]")
+    return 2
+
+
+def _cmd_member_list(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+    from key_amnesia.vault import detect_vault_magic, MAGIC_KAM2
+
+    ctx = _ctx_from_args(args)
+    if not ctx.vault_path.exists():
+        theme.error("Vault not initialized. Run 'ka init' first.")
+        return 1
+    if detect_vault_magic(ctx.vault_path) != MAGIC_KAM2:
+        theme.info("Vault is KAM1 (roles not enabled). Add a member to upgrade.")
+        return 0
+
+    request = PromptRequest(
+        action="member_list",
+        detail="list members",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("member list requires inline auth")
+        return 1
+    try:
+        payload = load_vault(ctx.vault_path, password)
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        return 1
+    members = (payload.get("kam2") or {}).get("members") or {}
+    if not members:
+        theme.info("No members.")
+        return 0
+    for mid, info in sorted(members.items(), key=lambda kv: kv[1].get("name", "")):
+        theme.out(
+            f"{info.get('name')}  role={info.get('role')}  pubkey={info.get('box_pk')}"
+        )
+    if not roles.verify_acl_signature(payload):
+        theme.warn(
+            "ACL signature verification FAILED (tamper-evident warning — "
+            "cryptographic detection only)."
+        )
+    return 0
+
+
+def _cmd_member_add(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+    from key_amnesia.vault import MAGIC_KAM1, MAGIC_KAM2, detect_vault_magic
+
+    if not sys.stdin.isatty() and not getattr(args, "yes", False):
+        theme.error(
+            "Error: ka member add requires an interactive terminal "
+            "(or --yes to confirm a KAM1->KAM2 upgrade)."
+        )
+        return 1
+
+    ctx = _ctx_from_args(args)
+    if not ctx.vault_path.exists():
+        theme.error("Vault not initialized. Run 'ka init' first.")
+        return 1
+
+    request = PromptRequest(
+        action="member_add",
+        detail=f"add member {args.name} role={args.role}",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("member add requires inline auth")
+        return 1
+
+    denied = _check_role_policy(ctx.vault_path, password, "member_add")
+    if denied is not None:
+        return denied
+
+    magic = detect_vault_magic(ctx.vault_path)
+    try:
+        if magic == MAGIC_KAM1:
+            def _confirm(msg: str) -> bool:
+                if getattr(args, "yes", False):
+                    return True
+                theme.warn(msg)
+                return _yes_no("Type yes to upgrade")
+
+            def _announce(msg: str) -> None:
+                theme.warn(msg)
+
+            payload = roles.migrate_kam1_to_kam2(
+                ctx.vault_path,
+                password,
+                confirm=_confirm,
+                announce=_announce,
+            )
+            theme.success(
+                f"Upgraded to KAM2. Backup: {roles.kam1_backup_path(ctx.vault_path)}"
+            )
+        elif magic == MAGIC_KAM2:
+            payload = load_vault(ctx.vault_path, password)
+        else:
+            theme.error("Unrecognized vault format")
+            return 1
+
+        roles.add_member(
+            payload,
+            name=args.name,
+            box_pk_hex=args.pubkey,
+            role=args.role,
+        )
+        save_vault(ctx.vault_path, password, payload)
+    except roles.RolesError as e:
+        theme.error(f"Error: {e}")
+        return 1
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        return 1
+
+    audit_event(
+        "member_add",
+        route=outcome.route,
+        result="allowed",
+        reason=f"{args.name}:{args.role}",
+    )
+    theme.success(f"Added member '{args.name}' with role '{args.role}'.")
+    theme.info(
+        "Grant secrets with: ka grant SECRET --to "
+        f"{args.name}  (cryptographic wraps; runner reveal/copy is policy-only)"
+    )
+    return 0
+
+
+def _cmd_member_remove(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    ctx = _ctx_from_args(args)
+    request = PromptRequest(
+        action="member_remove",
+        detail=f"remove member {args.name}",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("member remove requires inline auth")
+        return 1
+    denied = _check_role_policy(ctx.vault_path, password, "member_remove")
+    if denied is not None:
+        return denied
+    try:
+        payload = load_vault(ctx.vault_path, password)
+        payload, warning = roles.remove_member(payload, args.name)
+        save_vault(ctx.vault_path, password, payload)
+    except (roles.RolesError, VaultError) as e:
+        theme.error(f"Error: {e}")
+        return 1
+    audit_event(
+        "member_remove", route=outcome.route, result="allowed", reason=args.name
+    )
+    theme.success(f"Removed member '{args.name}'.")
+    theme.warn(warning)
+    return 0
+
+
+def cmd_grant(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    ctx = _ctx_from_args(args)
+    request = PromptRequest(
+        action="grant",
+        secret_names=[args.secret],
+        detail=f"grant {args.secret} to {args.to}",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("grant requires inline auth")
+        return 1
+    denied = _check_role_policy(ctx.vault_path, password, "grant")
+    if denied is not None:
+        return denied
+    try:
+        payload = load_vault(ctx.vault_path, password)
+        roles.grant_secret(payload, args.secret, args.to)
+        save_vault(ctx.vault_path, password, payload)
+    except (roles.RolesError, VaultError) as e:
+        theme.error(f"Error: {e}")
+        return 1
+    audit_event(
+        "grant",
+        secret_names=[args.secret],
+        route=outcome.route,
+        result="allowed",
+        reason=f"to={args.to}",
+    )
+    theme.success(f"Granted '{args.secret}' to '{args.to}' (cryptographic wrap).")
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    ctx = _ctx_from_args(args)
+    request = PromptRequest(
+        action="revoke",
+        secret_names=[args.secret],
+        detail=f"revoke {args.secret} from {args.member}",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("revoke requires inline auth")
+        return 1
+    denied = _check_role_policy(ctx.vault_path, password, "revoke")
+    if denied is not None:
+        return denied
+    try:
+        payload = load_vault(ctx.vault_path, password)
+        roles.revoke_secret(payload, args.secret, args.member)
+        save_vault(ctx.vault_path, password, payload)
+    except (roles.RolesError, VaultError) as e:
+        theme.error(f"Error: {e}")
+        return 1
+    audit_event(
+        "revoke",
+        secret_names=[args.secret],
+        route=outcome.route,
+        result="allowed",
+        reason=f"from={args.member}",
+    )
+    theme.success(f"Revoked '{args.secret}' from '{args.member}'.")
+    theme.warn("Rotate the secret if the member may have exported it earlier.")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from key_amnesia import roles
+
+    ctx = _ctx_from_args(args)
+    request = PromptRequest(
+        action="export",
+        detail=f"export for {args.member}",
+        vault_path=str(ctx.vault_path),
+    )
+    ok, password, outcome = _auth_password(request)
+    if not ok:
+        theme.error(f"Denied: {outcome.reason}")
+        return 1
+    if password is None:
+        theme.error("export requires inline auth")
+        return 1
+    denied = _check_role_policy(ctx.vault_path, password, "export")
+    if denied is not None:
+        return denied
+    try:
+        payload = load_vault(ctx.vault_path, password)
+        blob = roles.build_export_blob(payload, args.member)
+    except (roles.RolesError, VaultError) as e:
+        theme.error(f"Error: {e}")
+        return 1
+    out_path = Path(args.output) if args.output else Path(f"{args.member}.kamx")
+    out_path.write_bytes(blob)
+    audit_event(
+        "export",
+        route=outcome.route,
+        result="allowed",
+        reason=f"for={args.member}",
+    )
+    theme.success(
+        f"Wrote export for '{args.member}' to {out_path} "
+        f"(ciphertext only — cryptographic SealedBox; only their ACL'd secrets)."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1554,6 +2002,11 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "connect": cmd_status,  # plain alias — no separate guard verb
         "setup": cmd_setup,
+        "identity": cmd_identity,
+        "member": cmd_member,
+        "grant": cmd_grant,
+        "revoke": cmd_revoke,
+        "export": cmd_export,
     }
     handler = handlers.get(args.command)
     if handler is None:
