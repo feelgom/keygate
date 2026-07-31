@@ -96,7 +96,8 @@ ka lock                             # end it early, any time
 | `ka set NAME` | Store or update a secret (value typed hidden; password required; vault must already exist) |
 | `ka remove NAME` | Delete a secret (password required) |
 | `ka import FILE` | Import a dotenv-format file's `NAME=value` pairs into the resolved vault (project vault when inside a project; TTY-only) — asks before overwriting a name that already exists, and offers to delete/rename the source file, add `.env*` to `.gitignore`, and generate/merge a minimal `amnesia.toml` |
-| `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
+| `ka check [--json]` | Compare `amnesia.toml` required secrets to the **project** names sidecar (no decrypt, no global vault). Non-zero exit on missing required — designed for CI |
+| `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. When a project `amnesia.toml` exists, fails before inject if required secrets are missing |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
 | `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start a cached session; `--pre-admit` loudly auto-admits the very next connecting process for a bounded window (15m default), without a yes/no prompt — scope it to specific secrets with `--pre-admit-secret`, repeatable, or leave it off for ALL secrets |
 | `ka lock` | End a cached session early |
@@ -121,6 +122,19 @@ ka run --secret API_KEY -- ...
 Walk-up from cwd finds the nearest `.amnesia/` (stops at your home directory). By default the project vault **merges** with the global `~/.key-amnesia` vault (project wins on name collision); set `"use_global": false` in `.amnesia/config.json` or pass `--no-global` to isolate. Per-environment vaults live at `.amnesia/envs/<name>/vault.bin` (`--env NAME` or `KA_ENV`). Existing global-only setups need no migration — no `.amnesia/` means everything stays global.
 
 Daily use: **one `ka unlock` per project vault**. Guard lock + death-state files sit beside the active vault; a discovery-only registry at `~/.key-amnesia/guards/` lists live guards (address/pid/expiry — **never** the authkey).
+
+### Project manifest + CI (`amnesia.toml`, since 0.3.11)
+
+Commit an `amnesia.toml` at the project root declaring which secrets the project expects (no values):
+
+```toml
+[secrets.API_KEY]
+required = true
+description = "Provider API key"
+env = "API_KEY"
+```
+
+`ka import` writes/merges this automatically. In CI, run `ka check` (or `ka check --json`) after the project vault's names sidecar is present — it compares required entries to the **project** names file only, never decrypts, never looks at the global vault, and exits non-zero on missing required secrets. Locally, `ka run` also refuses to inject when required secrets from that manifest are absent.
 
 Every command supports `--help`.
 

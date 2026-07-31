@@ -85,49 +85,16 @@ def import_entries(
     return imported, skipped
 
 
-_ENV_FIELD_RE = re.compile(r'^\s*env\s*=\s*"([^"]*)"\s*$', re.MULTILINE)
-
-
-def _existing_manifest_envs(manifest_text: str) -> set[str]:
-    return set(_ENV_FIELD_RE.findall(manifest_text))
-
-
-def _manifest_block(name: str) -> str:
-    return (
-        "[[secret]]\n"
-        f'name = "{name}"\n'
-        "required = true\n"
-        'description = ""\n'
-        f'env = "{name}"\n'
-    )
-
-
 def generate_or_merge_manifest(names: list[str], project_root: Path) -> Path:
     """Create or merge a minimal ``amnesia.toml`` covering ``names``.
 
-    Each entry is a minimal ``[[secret]]`` table (``name``, ``required =
-    true``, ``description = ""``, ``env``). Existing entries (matched on
-    their ``env`` field) are left untouched — this only appends blocks for
-    names not already present. Returns the manifest path unconditionally
-    (even if nothing needed to be added).
+    Delegates to :func:`key_amnesia.manifest.generate_or_merge_manifest`
+    (canonical ``[secrets.NAME]`` schema since 0.3.11). Kept as a re-export
+    so ``ka import`` and tests keep importing from this module.
     """
-    manifest_path = project_root / "amnesia.toml"
-    existing_text = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
-    existing_envs = _existing_manifest_envs(existing_text)
+    from key_amnesia.manifest import generate_or_merge_manifest as _gen
 
-    new_blocks = [_manifest_block(name) for name in names if name not in existing_envs]
-    if not new_blocks:
-        return manifest_path
-
-    content = existing_text
-    if content and not content.endswith("\n"):
-        content += "\n"
-    if content:
-        content += "\n"
-    content += "\n".join(new_blocks)
-
-    manifest_path.write_text(content, encoding="utf-8")
-    return manifest_path
+    return _gen(names, project_root)
 
 
 _GITIGNORE_ENV_PATTERNS = {".env*", ".env", ".env.*"}
