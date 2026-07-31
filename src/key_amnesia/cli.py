@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,10 @@ from key_amnesia.vault import (
     read_names,
     save_vault,
 )
+
+# Canonical human docs (GitHub wiki). Per-command --docs deferred until wiki IA
+# is stable — one entry point avoids a rotting cmd→URL map.
+DOCS_URL = "https://github.com/fujitoid/key-amnesia/wiki"
 
 
 def _write_command_output(stream: Any, text: str) -> None:
@@ -347,6 +352,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hook-only",
         action="store_true",
         help="Only merge the hook config; skip installing skills",
+    )
+
+    # docs — open/print wiki URL; no vault/guard/password
+    p_docs = sub.add_parser(
+        "docs",
+        help="Print the documentation URL (and open it in a browser unless --print)",
+    )
+    p_docs.add_argument(
+        "--print",
+        dest="print_only",
+        action="store_true",
+        help="Print the URL only; do not try to open a browser",
     )
 
     # identity (local X25519 keypair for KAM2 membership)
@@ -1642,6 +1659,23 @@ def cmd_passwd(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_docs(args: argparse.Namespace) -> int:
+    """Print the wiki URL; optionally open a browser. Never touches the vault.
+
+    Always exits 0 — a missing browser or failed open must not fail the command.
+    Per-command ``--docs`` flags are deferred; this is the single entry point.
+    """
+    # Plain print so agents and scripts can capture the URL without theme codes.
+    print(DOCS_URL)
+    if getattr(args, "print_only", False):
+        return 0
+    try:
+        webbrowser.open(DOCS_URL)
+    except Exception:
+        pass
+    return 0
+
+
 def cmd_identity(args: argparse.Namespace) -> int:
     from key_amnesia import roles
 
@@ -2002,6 +2036,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "connect": cmd_status,  # plain alias — no separate guard verb
         "setup": cmd_setup,
+        "docs": cmd_docs,
         "identity": cmd_identity,
         "member": cmd_member,
         "grant": cmd_grant,

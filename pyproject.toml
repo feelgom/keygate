@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "key-amnesia"
-version = "0.3.13"
-description = "Encrypted secret vault with human-prompt routing and output scrubbing"
+version = "0.3.14"
+description = "Encrypted secret vault so AI agents can use API keys without seeing them — a drop-in .env replacement"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -34,6 +34,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/fujitoid/key-amnesia"
+Documentation = "https://github.com/fujitoid/key-amnesia/wiki"
 Repository = "https://github.com/fujitoid/key-amnesia"
 Issues = "https://github.com/fujitoid/key-amnesia/issues"
 Funding = "https://www.buymeacoffee.com/fujitoid"
