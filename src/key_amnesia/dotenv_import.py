@@ -1,9 +1,8 @@
 """Shared dotenv parsing + vault-import core.
 
-Used by `ka import` (this module's first caller) and, per the roadmap,
-reusable by a future `ka scan`'s offer-to-import path (PR 5) — keep the
-pure logic here decision-injectable (callbacks) rather than baking in any
-particular CLI's prompt wording.
+Used by ``ka import`` and by ``ka scan``'s offer-to-import path —
+keep the pure logic here decision-injectable (callbacks) rather than
+baking in any particular CLI's prompt wording.
 
 Hard rule: nothing in this module ever prints, logs, or returns a secret
 *value* on its own initiative — callers own all display, and even they

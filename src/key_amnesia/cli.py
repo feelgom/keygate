@@ -29,6 +29,7 @@ from key_amnesia.project import (
 )
 from key_amnesia.prompt_route import PromptRequest, require_human_auth
 from key_amnesia.setup_cmd import cmd_setup
+from key_amnesia import scan as scan_mod
 from key_amnesia import theme
 from key_amnesia.vault import (
     VaultError,
@@ -167,6 +168,50 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON instead of human text",
     )
     _add_vault_scope_args(p_check)
+
+    # scan (LEAK — Locally Exposed Agent Keys; advisory)
+    p_scan = sub.add_parser(
+        "scan",
+        help=(
+            "Scan for LEAK (Locally Exposed Agent Keys): plaintext secret "
+            "files an agent can read (names/paths/counts only)"
+        ),
+    )
+    p_scan.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Also check home dotfiles, shell history, global git config, "
+            "and known MCP config paths (not a full home walk)"
+        ),
+    )
+    p_scan.add_argument(
+        "--include-excluded",
+        action="store_true",
+        help=(
+            "Include default-excluded dirs (node_modules, .venv/venv, build "
+            "dirs, .git internals). Git-history scanning is still out of scope."
+        ),
+    )
+    p_scan.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human text",
+    )
+    p_scan.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "After the report, import all importable dotenv findings into "
+            "the project vault without selection prompts (password still "
+            "required; skips delete/rename/gitignore offers)"
+        ),
+    )
+    p_scan.add_argument(
+        "--no-import",
+        action="store_true",
+        help="Report only; never offer to store findings in the vault",
+    )
 
     # run
     p_run = sub.add_parser(
@@ -688,6 +733,241 @@ def cmd_check(args: argparse.Namespace) -> int:
         else:
             theme.error(text)
     return 0 if result.ok else 1
+
+
+def _scan_select_findings(
+    importable: list[scan_mod.Finding],
+    *,
+    yes: bool,
+) -> list[scan_mod.Finding]:
+    """Pick which importable findings to store. ``--yes`` takes all."""
+    if not importable:
+        return []
+    if yes:
+        return list(importable)
+    theme.out("")
+    theme.info(
+        f"{len(importable)} importable dotenv finding(s). "
+        "Store selected secrets into the project vault?"
+    )
+    if not _confirm("Offer to import selected findings into the project vault?"):
+        return []
+    theme.out("Select findings to import (comma-separated numbers, or 'all'):")
+    for i, f in enumerate(importable, start=1):
+        names = ", ".join(f.secret_names)
+        theme.out(f"  {i}. {f.path}  ({f.secret_count}: {names})")
+    try:
+        answer = input("Selection [all]: ").strip().lower()
+    except EOFError:
+        return []
+    if not answer or answer == "all":
+        return list(importable)
+    chosen: list[scan_mod.Finding] = []
+    for part in answer.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            continue
+        idx = int(part)
+        if 1 <= idx <= len(importable):
+            chosen.append(importable[idx - 1])
+    return chosen
+
+
+def _scan_import_into_project(
+    selected: list[scan_mod.Finding],
+    project_root: Path,
+    *,
+    yes: bool,
+) -> int:
+    """Store selected dotenv findings into the project vault via dotenv_import.
+
+    Creates ``.amnesia/`` if needed. Never prints secret values. With
+    ``yes=True``, skips collision/delete/rename/gitignore prompts (safe
+    defaults: skip collisions, keep source files, leave gitignore alone).
+    """
+    if not selected:
+        return 0
+
+    vp = ensure_project_scaffold(project_root, use_global=True)
+    if not vp.exists():
+        if not sys.stdin.isatty():
+            theme.error(
+                "Error: project vault does not exist and cannot be created "
+                "without an interactive terminal. Run 'ka init --project' first."
+            )
+            return 1
+        theme.info(f"No project vault yet — creating {vp}")
+        password = _prompt_new_master_password()
+        if password is None:
+            return 1
+        try:
+            save_vault(vp, password, empty_payload())
+        except VaultError as e:
+            theme.error(f"Error: {e}")
+            return 1
+        theme.success(f"Vault initialized at {vp}")
+    else:
+        if not sys.stdin.isatty():
+            theme.error(
+                "Error: importing scan findings requires an interactive "
+                "terminal (master password)."
+            )
+            return 1
+        password = getpass.getpass("Master password: ")
+
+    try:
+        payload = load_vault(vp, password)
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        audit_event("scan_import", route="inline", result="denied", reason=str(e))
+        return 1
+
+    all_imported: list[str] = []
+    all_skipped: list[str] = []
+
+    for finding in selected:
+        src = Path(finding.path)
+        if not src.exists():
+            theme.info(f"Skipped missing file: {src}")
+            continue
+        try:
+            entries = dotenv_import.parse_dotenv(src)
+        except OSError as e:
+            theme.error(f"Error reading {src}: {e}")
+            continue
+        if not entries:
+            continue
+
+        def _ask_collision(name: str, _yes: bool = yes) -> str:
+            if _yes:
+                return "skip"
+            overwrite = _confirm(f"'{name}' already exists in the vault. Overwrite?")
+            return "overwrite" if overwrite else "skip"
+
+        imported, skipped = dotenv_import.import_entries(
+            entries, payload["secrets"], on_collision=_ask_collision
+        )
+        all_imported.extend(imported)
+        all_skipped.extend(skipped)
+
+        if imported and not yes:
+            outcome = dotenv_import.delete_or_rename_source(
+                src,
+                confirm_delete=lambda s=src: _confirm(
+                    f"Delete {s} now that its secrets are in the vault?"
+                ),
+                confirm_delete_again=lambda s=src: _confirm(
+                    f"This cannot be undone. Really delete {s}?"
+                ),
+                confirm_rename=lambda s=src: _confirm(
+                    f"Rename {s} to {s.name}.imported instead?", default=True
+                ),
+            )
+            if outcome == "deleted":
+                theme.success(f"Deleted {src}.")
+            elif outcome == "renamed":
+                theme.success(f"Renamed {src} to {src.name}.imported.")
+            else:
+                theme.info(f"Left {src} in place.")
+
+    if all_imported:
+        save_vault(vp, password, payload)
+        audit_event(
+            "scan_import",
+            secret_names=all_imported,
+            route="inline",
+            result="allowed",
+        )
+        theme.success(
+            f"Imported {len(all_imported)} secret(s): {', '.join(all_imported)}"
+        )
+        manifest_path = dotenv_import.generate_or_merge_manifest(
+            all_imported, project_root
+        )
+        theme.info(f"Manifest updated: {manifest_path}")
+        if not yes:
+            added_gitignore = dotenv_import.offer_gitignore(
+                project_root,
+                ask=lambda: _confirm(
+                    "Add '.env*' to .gitignore so these files are never committed?"
+                ),
+            )
+            if added_gitignore:
+                theme.success("Added '.env*' to .gitignore.")
+    if all_skipped:
+        theme.info(f"Skipped (already in vault): {', '.join(all_skipped)}")
+    if not all_imported and not all_skipped:
+        theme.info("Nothing imported.")
+    return 0
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    """``ka scan``: find LEAK (Locally Exposed Agent Keys) under cwd.
+
+    Default exclusions skip ``node_modules``, ``.venv``/``venv``, common
+    build dirs, and ``.git`` internals. ``--deep`` adds home/shell/MCP
+    paths. Never prints secret values. Non-zero exit if any LEAK count > 0.
+    Optionally offers to store selected dotenv findings into the project
+    vault via the shared ``dotenv_import`` core.
+    """
+    project_root = Path.cwd().resolve()
+    findings = scan_mod.scan_project(
+        project_root,
+        include_excluded=bool(getattr(args, "include_excluded", False)),
+    )
+    if getattr(args, "deep", False):
+        # Avoid double-counting files already seen under the project tree
+        # when cwd is inside home.
+        seen = {f.path for f in findings}
+        for f in scan_mod.scan_deep():
+            if f.path not in seen:
+                findings.append(f)
+                seen.add(f.path)
+
+    as_json = bool(getattr(args, "json", False))
+    if as_json:
+        theme.out(
+            json.dumps(
+                scan_mod.findings_to_json(
+                    findings, project_root=str(project_root)
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
+    else:
+        theme.out(scan_mod.format_human_report(findings, project_root=project_root))
+        theme.out("")
+
+    n = scan_mod.leak_count(findings)
+    exit_code = 1 if n > 0 else 0
+
+    # JSON / --no-import: report only. Interactive offer otherwise.
+    if as_json or getattr(args, "no_import", False):
+        return exit_code
+
+    importable = scan_mod.importable_findings(findings)
+    if not importable:
+        return exit_code
+
+    yes = bool(getattr(args, "yes", False))
+    if yes and not sys.stdin.isatty():
+        theme.error(
+            "Error: --yes import still needs an interactive terminal "
+            "for the master password. Re-run in your console, or use "
+            "--no-import / --json for report-only."
+        )
+        return exit_code
+
+    if not yes and not sys.stdin.isatty():
+        # Non-TTY agents get the report + non-zero; no interactive offer.
+        return exit_code
+
+    selected = _scan_select_findings(importable, yes=yes)
+    if selected:
+        _scan_import_into_project(selected, project_root, yes=yes)
+
+    return exit_code
 
 
 def _load_merged_secrets(
@@ -1263,6 +1543,7 @@ def main(argv: list[str] | None = None) -> int:
         "remove": cmd_remove,
         "import": cmd_import,
         "check": cmd_check,
+        "scan": cmd_scan,
         "run": cmd_run,
         "list": cmd_list,
         "unlock": cmd_unlock,

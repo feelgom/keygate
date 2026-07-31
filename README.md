@@ -97,6 +97,7 @@ ka lock                             # end it early, any time
 | `ka remove NAME` | Delete a secret (password required) |
 | `ka import FILE` | Import a dotenv-format file's `NAME=value` pairs into the resolved vault (project vault when inside a project; TTY-only) — asks before overwriting a name that already exists, and offers to delete/rename the source file, add `.env*` to `.gitignore`, and generate/merge a minimal `amnesia.toml` |
 | `ka check [--json]` | Compare `amnesia.toml` required secrets to the **project** names sidecar (no decrypt, no global vault). Non-zero exit on missing required — designed for CI |
+| `ka scan [--deep] [--include-excluded] [--json] [--yes] [--no-import]` | Scan for LEAK (Locally Exposed Agent Keys): plaintext secret files an agent can read. Names/paths/counts only — never values. Non-zero if any LEAK. Default skips `node_modules`/`.venv`/build/`.git`; `--deep` adds home/shell/MCP paths. Offers to store selected dotenv findings into the project vault |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. When a project `amnesia.toml` exists, fails before inject if required secrets are missing |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
 | `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start a cached session; `--pre-admit` loudly auto-admits the very next connecting process for a bounded window (15m default), without a yes/no prompt — scope it to specific secrets with `--pre-admit-secret`, repeatable, or leave it off for ALL secrets |
@@ -136,6 +137,17 @@ env = "API_KEY"
 
 `ka import` writes/merges this automatically. In CI, run `ka check` (or `ka check --json`) after the project vault's names sidecar is present — it compares required entries to the **project** names file only, never decrypts, never looks at the global vault, and exits non-zero on missing required secrets. Locally, `ka run` also refuses to inject when required secrets from that manifest are absent.
 
+### LEAK scan (`ka scan`, since 0.3.12)
+
+```bash
+ka scan                  # project tree from cwd
+ka scan --deep           # + home dotfiles / shell history / git config / MCP configs
+ka scan --json           # machine-readable; report-only
+ka scan --yes            # import all importable dotenv hits into .amnesia/ (password still required)
+```
+
+Reports **Locally Exposed Agent Keys** — files and light patterns an agent sitting in your project can read. The headline is `N LEAK found — your agent can read N secrets in this project`. Detection covers `.env*`, `credentials.json`, `.npmrc`, `.pypirc`, SSH private keys, MCP configs, and assignment patterns shared carefully with the secret-guard hook. Default exclusions skip `node_modules`, `.venv`/`venv`, common build dirs, and `.git` internals (`--include-excluded` to include them). Git-history scanning is a separate feature and is **not** part of the default path. Values are never printed. After the human report, you can store **selected** dotenv findings into the project vault (creates `.amnesia/` if needed) with the same collision / delete double-confirm / `.env.imported` / gitignore offers as `ka import`.
+
 Every command supports `--help`.
 
 `reveal` and `copy` deserve a special note: even if an agent invokes them, the value appears **only in the pop-up window on your screen** (or your clipboard) — the agent's own process receives nothing but a status flag. And they *always* require a fresh password, session or no session — so an agent can never ride an open session into actually reading a value.
@@ -152,6 +164,7 @@ For the security-curious — the full detail lives in [DESIGN.md](DESIGN.md):
 - **Admission consent, bound to real process identity:** the first command from an unrecognized process reaching a live guard triggers a one-time yes/no prompt in the guard's own terminal window. Approval is tied to that connecting process's **kernel-verified identity** (its actual OS pid + creation time, confirmed by the operating system itself — not anything the client claims) — a real child process of an already-approved one is recognized automatically; a separate, unrelated process gets its own prompt. There is no on-disk admission credential to steal. This sits on top of — never replaces — the hard guarantee above.
 - **Honest death reporting:** `ka lock` / `ka status` tell you what actually happened to the last session (`locked`, `expired`, `interrupted`, or `crashed: <reason>`) instead of a bare "no active session."
 - **`ka import` reads the local file directly, on purpose.** Unlike `ka set`, which always has *you* type the value so nothing ever passes through an agent, `ka import` is TTY-only (never routed through the spawned-console agent-safe helper) and parses the dotenv file itself — it still never prints a value to your screen or anywhere else, and every follow-up decision (overwrite an existing name, delete or rename the source file, add `.env*` to `.gitignore`) is an explicit prompt, never silent.
+- **`ka scan` is advisory.** It tells you where plaintext secrets sit so an agent can read them (LEAK = Locally Exposed Agent Keys). It never prints values, and storing findings into the vault is always an explicit post-report choice (or `--yes`), never automatic.
 
 Files live in `~/.key-amnesia/` (override: `KEY_AMNESIA_HOME`, `KEY_AMNESIA_VAULT_PATH`).
 
