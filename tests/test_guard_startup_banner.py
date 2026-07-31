@@ -25,7 +25,6 @@ def test_startup_banner_shows_expiry_clock_and_how_to_stop(monkeypatch) -> None:
         guard_mod.ipc, "start_listener", lambda: (object(), "addr", b"k" * 32)
     )
     monkeypatch.setattr(guard_mod, "write_guard_lock", lambda *a, **k: None)
-    monkeypatch.setattr(guard_mod, "clear_admission_token", lambda *a, **k: None)
     monkeypatch.setattr(guard_mod, "clear_guard_lock", lambda *a, **k: None)
     monkeypatch.setattr(guard_mod, "guard_serve", lambda state, listener: "locked")
     monkeypatch.setattr(guard_mod, "_write_last_guard_state", lambda *a, **k: None)

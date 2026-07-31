@@ -56,6 +56,60 @@ def test_cmd_unlock_calls_foreground_guard_no_subprocess(
     assert isinstance(calls["kwargs"]["vault_key"], bytes)
 
 
+def test_cmd_unlock_pre_admit_flags_thread_through(
+    seeded_vault, password, monkeypatch
+) -> None:
+    """`--pre-admit` / `--pre-admit-secret` reach `run_foreground_guard`
+    unchanged — the actual arming/consumption logic is covered in
+    test_guard_admission.py."""
+    monkeypatch.setattr(
+        "key_amnesia.cli.require_human_auth",
+        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+    )
+    monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
+
+    calls: dict = {}
+
+    def fake_run_foreground_guard(payload, timeout_minutes, **kwargs):
+        calls["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(
+        "key_amnesia.guard.run_foreground_guard", fake_run_foreground_guard
+    )
+
+    rc = main(["unlock", "--pre-admit", "--pre-admit-secret", "api_key"])
+    assert rc == 0
+    assert calls["kwargs"]["pre_admit"] is True
+    assert calls["kwargs"]["pre_admit_secrets"] == ["api_key"]
+    assert calls["kwargs"]["pre_admit_seconds"] == 900  # default config value
+
+
+def test_cmd_unlock_no_pre_admit_by_default(
+    seeded_vault, password, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "key_amnesia.cli.require_human_auth",
+        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+    )
+    monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
+
+    calls: dict = {}
+
+    def fake_run_foreground_guard(payload, timeout_minutes, **kwargs):
+        calls["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(
+        "key_amnesia.guard.run_foreground_guard", fake_run_foreground_guard
+    )
+
+    rc = main(["unlock"])
+    assert rc == 0
+    assert calls["kwargs"]["pre_admit"] is False
+    assert calls["kwargs"]["pre_admit_secrets"] == []
+
+
 def test_cmd_unlock_already_active_soft_warns(
     seeded_vault, password, monkeypatch, capsys
 ) -> None:

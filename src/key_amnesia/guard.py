@@ -7,11 +7,15 @@ Authkey only (no session_key).
 `ka unlock` *is* the guard: unlike v2, there is no detached child process and
 no bootstrap-env handoff. `run_foreground_guard` runs in the caller's own
 terminal, printing live status lines and blocking in `guard_serve` until the
-vault is locked, the session expires, or the terminal is interrupted. A
-lightweight admission-consent layer sits on top of the authkey trust
-boundary: the first request from any client is gated by a yes/no prompt on
-the guard's own TTY; once admitted, that opaque token skips the prompt for
-the rest of the guard's lifetime.
+vault is locked, the session expires, or the terminal is interrupted.
+
+Admission (0.3.8): a lightweight consent layer sits on top of the authkey
+trust boundary. The first request from an unrecognized process *tree* is
+gated by a yes/no prompt on the guard's own TTY; approval binds admission to
+the connecting process's **kernel-verified identity** (`peer_identity.py`),
+not to a bearer credential — there is nothing admission-related on disk to
+steal. See `_check_admission` for the full model, including secret-scoped
+grants and opt-in pre-admit.
 """
 
 from __future__ import annotations
@@ -29,17 +33,21 @@ from pathlib import Path
 from typing import Any, Callable
 
 from key_amnesia import ipc
+from key_amnesia import peer_identity
 from key_amnesia import theme
 from key_amnesia import vault as vault_mod
 from key_amnesia.audit import audit_event
-from key_amnesia.paths import (
-    admitted_session_token_path,
-    guard_lock_path,
-    last_guard_state_path,
-)
+from key_amnesia.paths import guard_lock_path, last_guard_state_path
+from key_amnesia.peer_identity import PeerIdentity
 from key_amnesia.run_exec import run_with_secrets
 
-AdmitPromptFn = Callable[[int, str], bool]
+# `AdmitPromptFn` covers two calling conventions depending on which
+# admission path is in play — see `_check_admission` / `_check_admission_legacy`:
+#   - new (kernel-identity) path: called as `admit_prompt(peer, summary)`
+#     where `peer` is a `PeerIdentity`.
+#   - legacy (no-`peer`-supplied) path: called as `admit_prompt(pid, summary)`
+#     with a bare int, exactly as before 0.3.8.
+AdmitPromptFn = Callable[[Any, str], bool]
 
 # How long the guard's admission prompt waits for a yes/no before denying.
 ADMISSION_TIMEOUT_S = 60.0
@@ -50,6 +58,13 @@ EXTEND_PROMPT_WINDOW_S = 120.0
 # How often the guard nudges an idle terminal with time remaining.
 REMINDER_INTERVAL_S = 300.0
 
+# Sentinel default for `guard_handle_message`'s `peer` kwarg — distinguishes
+# "caller doesn't know about kernel peer identity at all" (pre-0.3.8 test
+# helpers; falls back to the legacy opaque-token comparison) from an
+# explicit `peer=None` ("a real lookup was attempted and failed"), which
+# always fails closed. See `_check_admission`.
+_PEER_UNSET = object()
+
 
 def _format_hms(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -59,12 +74,36 @@ def _format_hms(seconds: float) -> str:
 
 @dataclass
 class AdmittedSession:
-    """One in-memory admitted client record — lives only for this guard run."""
+    """One in-memory admitted process-tree record — lives only for this guard run.
 
-    token: str
-    first_seen: str
+    `identities` holds the kernel-verified `PeerIdentity` of the process
+    that was actually admitted (see `peer_identity.is_in_admitted_tree` for
+    how later connections are matched against it — a real OS descendant of
+    an admitted process is silently in-tree; a merely-sibling process, even
+    one sharing a distant common ancestor like a login shell, is not).
+
+    `granted_secrets` / `unscoped` implement secret-scoped grants: a `run`
+    naming a secret outside the current grant re-prompts instead of being
+    silently allowed, unless `unscoped` (only ever true for the loud,
+    opt-in `--pre-admit` ALL-secrets case — see `run_foreground_guard`).
+
+    `token` is a **legacy-only** field: it exists purely so
+    `guard_handle_message` keeps working, unmodified, for callers that
+    predate kernel peer identity and never pass a `peer` kwarg (several
+    pre-0.3.8 tests construct `AdmittedSession(token=..., ...)` directly).
+    `guard_serve` — the only production caller — always supplies a real
+    `peer`, so this field is never consulted on a live guard; see
+    `_check_admission_legacy`.
+    """
+
+    identities: list[PeerIdentity] = field(default_factory=list)
+    first_seen: str = ""
     request_count: int = 0
     last_summary: str = ""
+    granted_secrets: set[str] = field(default_factory=set)
+    granted_until: float = 0.0
+    unscoped: bool = False
+    token: str = ""
 
 
 @dataclass
@@ -93,6 +132,13 @@ class GuardState:
     # DESIGN.md "Derived key retained in guard memory".
     vault_key: bytes | None = None
     vault_content_fingerprint: str | None = None
+    # Opt-in, single-use pre-admit window (`ka unlock --pre-admit`) — see
+    # `_check_admission`. `pre_admit_until` is cleared (set back to None)
+    # the moment it is consumed by the first unrecognized peer, whether or
+    # not the window itself has since expired.
+    pre_admit_until: float | None = None
+    pre_admit_unscoped: bool = False
+    pre_admit_secrets: set[str] = field(default_factory=set)
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -169,50 +215,21 @@ def connect_guard(lock: dict[str, Any] | None = None) -> Connection | None:
         return None
 
 
-# --- admission token file (client-side cache of the guard's opaque token) --
-
-
-def read_admission_token(path: Path | None = None) -> str | None:
-    p = path or admitted_session_token_path()
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
-
-
-def write_admission_token(token: str, path: Path | None = None) -> None:
-    p = path or admitted_session_token_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(token + "\n", encoding="utf-8")
-
-
-def clear_admission_token(path: Path | None = None) -> None:
-    p = path or admitted_session_token_path()
-    try:
-        p.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
 def guard_request(msg: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] | None:
     """Send a message to the live guard; return response or None.
 
-    Centralizes admission-token plumbing so call sites (cmd_run / cmd_list /
-    cmd_lock / cmd_status / ...) stay thin: attaches the caller's pid and any
-    cached admission token to every outgoing message, and persists a fresh
-    token the guard hands back after admitting this client.
+    Since 0.3.8 the client attaches nothing admission-related — the guard
+    identifies the caller straight from the kernel at the IPC layer (see
+    `peer_identity.py`), so there is no opaque token to cache or present.
+    `client_name` is a **display-only** label (never a credential — see
+    `--name` / `KEY_AMNESIA_CLIENT_NAME`), defaulted here from the
+    environment so every guard-talking command picks it up automatically.
     """
     conn = connect_guard()
     if conn is None:
         return None
     out = dict(msg)
-    out.setdefault("caller_pid", os.getpid())
-    token = read_admission_token()
-    if token:
-        out.setdefault("admission_token", token)
+    out.setdefault("client_name", os.environ.get("KEY_AMNESIA_CLIENT_NAME", ""))
     try:
         ipc.send_msg(conn, out)
         reply = ipc.recv_msg(conn, timeout=timeout)
@@ -223,9 +240,6 @@ def guard_request(msg: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] 
             conn.close()
         except Exception:
             pass
-    new_token = reply.get("admission_token") if isinstance(reply, dict) else None
-    if new_token:
-        write_admission_token(str(new_token))
     return reply
 
 
@@ -234,6 +248,9 @@ def guard_request(msg: dict[str, Any], timeout: float = 30.0) -> dict[str, Any] 
 
 def _summarize_request(verb: str, msg: dict[str, Any]) -> str:
     if verb == "run":
+        names = [str(n) for n in (msg.get("secret_names") or [])]
+        if names:
+            return f"run with {', '.join(names)}"
         cmd = " ".join(str(c) for c in (msg.get("command") or []))
         return f"run `{cmd}`" if cmd else "run a command"
     if verb == "list":
@@ -333,19 +350,25 @@ class _StdinPump:
             return line
 
 
-def default_admit_prompt(caller_pid: int, summary: str, stdin_pump: _StdinPump) -> bool:
+def default_admit_prompt(
+    caller: "PeerIdentity | int", summary: str, stdin_pump: _StdinPump, client_name: str = ""
+) -> bool:
     """Blocking yes/no prompt on the guard's own foreground TTY.
 
-    Reads via the guard run's shared `stdin_pump` rather than its own
-    input() thread — see `_StdinPump` for why a per-call thread is the wrong
-    shape here; every prompt in one guard run must share the same reader.
+    Accepts either a kernel-verified `PeerIdentity` (new admission path,
+    shown as "verified") or a bare pid int (legacy path — see
+    `_check_admission_legacy`) so one function serves both. Reads via the
+    guard run's shared `stdin_pump` rather than its own input() thread —
+    see `_StdinPump` for why a per-call thread is the wrong shape here.
     Bounded by ADMISSION_TIMEOUT_S; deny on timeout or any non-yes answer.
     """
+    verified = isinstance(caller, PeerIdentity)
+    pid = caller.pid if isinstance(caller, PeerIdentity) else int(caller)
+    label = f"pid {pid}" + (", verified" if verified else "")
+    if client_name:
+        label = f"{client_name} ({label})"
     try:
-        theme.out(
-            f"Session (pid {caller_pid}) wants: {summary}. Admit? [y/N] ",
-            end="",
-        )
+        theme.out(f"Session ({label}) wants: {summary}. Admit? [y/N] ", end="")
     except Exception:
         pass
 
@@ -355,28 +378,189 @@ def default_admit_prompt(caller_pid: int, summary: str, stdin_pump: _StdinPump) 
     return line.strip().lower() in ("y", "yes")
 
 
+def _describe_scope(session: "AdmittedSession") -> str:
+    if session.unscoped:
+        return "ALL (unscoped pre-admit)"
+    if session.granted_secrets:
+        return ", ".join(sorted(session.granted_secrets))
+    return "(no secrets granted yet)"
+
+
+def _announce_admission(peer: PeerIdentity, session: "AdmittedSession", *, via: str) -> None:
+    """Loud TTY line + a distinct audit event for every new admission grant
+    (initial or scope-expanded), pre-admit or interactive alike."""
+    scope = _describe_scope(session)
+    try:
+        theme.success(f"Admitted client (pid {peer.pid}, {via}) — scope: {scope}.")
+    except Exception:
+        pass
+    audit_event(
+        "admission",
+        route="guard-session",
+        result="allowed",
+        reason=f"via={via} pid={peer.pid} scope={scope}",
+    )
+
+
+def _admit_peer(
+    state: GuardState,
+    peer: PeerIdentity,
+    *,
+    granted_secrets: set[str],
+    unscoped: bool,
+    summary: str,
+    via: str,
+) -> None:
+    """Create (or replace) `state.admitted` for a newly-approved peer.
+
+    Admission binds to the connecting peer's own kernel-verified identity
+    only — not a hop up to its parent — so a genuine OS descendant of this
+    exact process is silently in-tree (see `peer_identity.is_in_admitted_tree`)
+    while a merely-sibling process (e.g. the next separate CLI invocation
+    from the same shell) is treated as a fresh, unrecognized peer. This is
+    a deliberate trade-off for a bearer-token-free design — see
+    DESIGN.md "Process-tree ancestry admission" — `--pre-admit` exists to
+    smooth over a bounded window of expected repeat activity.
+    """
+    state.admitted = AdmittedSession(
+        identities=[peer],
+        first_seen=_utc_iso(),
+        request_count=1,
+        last_summary=summary,
+        granted_secrets=set() if unscoped else set(granted_secrets),
+        granted_until=state.expires_at,
+        unscoped=unscoped,
+    )
+    _announce_admission(peer, state.admitted, via=via)
+
+
 def _check_admission(
+    peer: Any,
     msg: dict[str, Any],
     state: GuardState,
     verb: str,
     admit_prompt: AdmitPromptFn | None,
 ) -> tuple[bool, str | None]:
-    """Return (admitted, new_token_or_None).
+    """Gate every verb behind kernel-verified process-tree identity.
 
-    Known token matching state.admitted skips the prompt entirely (no
-    re-prompt for the rest of this guard's lifetime). Missing/unknown token
-    triggers a fresh consent prompt; a fresh opaque token is minted only on
-    the *first* successful admission for this guard run.
+    `peer` is the connection's kernel-verified `PeerIdentity` — see
+    `peer_identity.py` — never a message-supplied pid. The `_PEER_UNSET`
+    sentinel (the default when `guard_handle_message` is called without a
+    `peer` kwarg at all) routes to `_check_admission_legacy`, the pre-0.3.8
+    opaque-token check, kept only for callers that predate kernel identity;
+    `guard_serve` always supplies a real `peer`. An explicit `peer=None`
+    (a real lookup that failed) always fails closed — never treated as the
+    legacy case.
+
+    Returns `(admitted, new_token_or_None)` — the token is always `None` on
+    this path (nothing is minted or handed back; see `_check_admission_legacy`
+    for where a token can still appear).
+    """
+    summary = _summarize_request(verb, msg)
+
+    if peer is _PEER_UNSET:
+        return _check_admission_legacy(msg, state, summary, admit_prompt)
+
+    if peer is None:
+        audit_event(
+            "admission",
+            route="guard-session",
+            result="warn",
+            reason="peer identity unavailable (unsupported platform or kernel lookup failed)",
+        )
+        return False, None
+
+    requested = set(msg.get("secret_names") or []) if verb == "run" else set()
+    client_name = str(msg.get("client_name") or "")
+    now = time.time()
+
+    def _prompt(caller: PeerIdentity) -> bool:
+        if admit_prompt is not None:
+            return bool(admit_prompt(caller, summary))
+        return bool(default_admit_prompt(caller, summary, state.stdin_pump, client_name))
+
+    # Pre-admit: an opt-in, single-use grant for the very next unrecognized
+    # peer within the configured window — consumed here, whether or not
+    # the peer would otherwise have needed a prompt.
+    if (
+        state.admitted is None
+        and state.pre_admit_until is not None
+        and now <= state.pre_admit_until
+    ):
+        unscoped = state.pre_admit_unscoped
+        _admit_peer(
+            state,
+            peer,
+            granted_secrets=set(state.pre_admit_secrets),
+            unscoped=unscoped,
+            summary=summary,
+            via="pre-admit",
+        )
+        state.pre_admit_until = None
+        state.pre_admit_unscoped = False
+        state.pre_admit_secrets = set()
+        return True, None
+
+    if state.admitted is not None and peer_identity.is_in_admitted_tree(
+        state.admitted.identities, peer
+    ):
+        session = state.admitted
+        in_scope = session.unscoped or requested <= session.granted_secrets
+        if in_scope and now <= session.granted_until:
+            session.request_count += 1
+            session.last_summary = summary
+            return True, None
+        # A recognized tree asking for something outside its current grant
+        # (a new secret name, or the grant itself lapsed) gets a fresh
+        # prompt to expand it — never a silent bypass.
+        if not _prompt(peer):
+            return False, None
+        if not session.unscoped:
+            session.granted_secrets = session.granted_secrets | requested
+        session.granted_until = state.expires_at
+        session.request_count += 1
+        session.last_summary = summary
+        _announce_admission(peer, session, via="interactive (scope expanded)")
+        return True, None
+
+    # Genuinely unrecognized peer/tree — loud regardless of the outcome.
+    audit_event(
+        "admission",
+        route="guard-session",
+        result="warn",
+        reason=f"unrecognized peer pid={peer.pid} wants: {summary}",
+    )
+    if not _prompt(peer):
+        return False, None
+    _admit_peer(state, peer, granted_secrets=requested, unscoped=False, summary=summary, via="interactive")
+    return True, None
+
+
+def _check_admission_legacy(
+    msg: dict[str, Any],
+    state: GuardState,
+    summary: str,
+    admit_prompt: AdmitPromptFn | None,
+) -> tuple[bool, str | None]:
+    """Pre-0.3.8 opaque-token admission.
+
+    Kept **only** so `guard_handle_message` stays callable exactly as
+    before by tests/call sites that predate kernel peer identity and never
+    pass a `peer` kwarg. `guard_serve` — the only production dispatch
+    path — always supplies a real `peer`, so this function never runs
+    against a live guard. It is the same in-memory equality check that
+    existed pre-0.3.8; the vulnerable *on-disk* bearer file
+    (`admitted_session.token`) it used to pair with is gone (see
+    `guard_request`) — nothing here is reachable from outside this process.
     """
     token = str(msg.get("admission_token") or "")
     caller_pid = int(msg.get("caller_pid") or 0)
 
     if state.admitted is not None and token and token == state.admitted.token:
         state.admitted.request_count += 1
-        state.admitted.last_summary = _summarize_request(verb, msg)
+        state.admitted.last_summary = summary
         return True, None
 
-    summary = _summarize_request(verb, msg)
     if admit_prompt is not None:
         approved = bool(admit_prompt(caller_pid, summary))
     else:
@@ -440,17 +624,31 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
         _maybe_reload_secrets(state)
 
     if verb == "status":
-        return {
+        admitted = state.admitted
+        reply: dict[str, Any] = {
             "ok": True,
             "pid": state.pid,
             "expires_at": _utc_iso(state.expires_at),
             "expires_at_epoch": state.expires_at,
             "secret_count": len(state.secrets),
             "expired": time.time() > state.expires_at,
-            "admitted": state.admitted is not None,
-            "admitted_since": state.admitted.first_seen if state.admitted else None,
-            "request_count": state.admitted.request_count if state.admitted else 0,
+            "admitted": admitted is not None,
+            "admitted_since": admitted.first_seen if admitted else None,
+            "request_count": admitted.request_count if admitted else 0,
         }
+        if admitted is not None:
+            reply["admitted_pids"] = [i.pid for i in admitted.identities]
+            reply["granted_secrets"] = _describe_scope(admitted)
+            reply["granted_until"] = _utc_iso(admitted.granted_until)
+        elif state.pre_admit_until is not None and time.time() <= state.pre_admit_until:
+            reply["pre_admit_pending"] = True
+            reply["pre_admit_scope"] = (
+                "ALL (unscoped pre-admit)"
+                if state.pre_admit_unscoped
+                else ", ".join(sorted(state.pre_admit_secrets)) or "(none)"
+            )
+            reply["pre_admit_until"] = _utc_iso(state.pre_admit_until)
+        return reply
 
     if verb == "list":
         names = sorted(state.secrets.keys())
@@ -465,7 +663,6 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
     if verb == "lock":
         audit_event("lock", route="guard-session", result="allowed")
         state.stop.set()
-        clear_admission_token()
         return {"ok": True, "lock": True}
 
     if verb == "renew":
@@ -541,15 +738,16 @@ def guard_handle_message(
     msg: dict[str, Any],
     state: GuardState,
     *,
+    peer: Any = _PEER_UNSET,
     admit_prompt: AdmitPromptFn | None = None,
 ) -> dict[str, Any]:
     """Handle one guard IPC message. Never returns raw secret values.
 
     Authkey check happens at the IPC layer (Listener/Client) before this
     function ever sees the message. On top of that, every verb is gated by
-    admission consent: a client presenting a missing/unknown token triggers
-    a yes/no prompt on the guard's own TTY (see `_check_admission`); a client
-    presenting the current admitted token skips straight to dispatch.
+    admission consent bound to kernel-verified process-tree identity — see
+    `_check_admission` for the full model (including the `_PEER_UNSET`
+    default's legacy fallback, kept for pre-0.3.8 callers).
     """
     if not isinstance(msg, dict):
         return {"ok": False, "reason": "invalid message"}
@@ -557,7 +755,7 @@ def guard_handle_message(
     verb = str(msg.get("verb") or msg.get("action") or "")
     state.request_count += 1
 
-    admitted, new_token = _check_admission(msg, state, verb, admit_prompt)
+    admitted, new_token = _check_admission(peer, msg, state, verb, admit_prompt)
     if not admitted:
         return {"ok": False, "reason": "admission denied", "admitted": False}
 
@@ -682,7 +880,8 @@ def guard_serve(state: GuardState, listener: Any) -> str:
         try:
             msg = ipc.recv_msg(conn, timeout=30.0)
             verb = str(msg.get("verb") or msg.get("action") or "") if isinstance(msg, dict) else "?"
-            reply = guard_handle_message(msg, state)
+            peer = peer_identity.get_peer_identity(conn)
+            reply = guard_handle_message(msg, state, peer=peer)
             ipc.send_msg(conn, reply)
             theme.info(f"guard: {verb or '?'} -> {'ok' if reply.get('ok') else 'denied'}")
             if reply.get("lock"):
@@ -775,6 +974,9 @@ def run_foreground_guard(
     *,
     vault_path: Path | str | None = None,
     vault_key: bytes | None = None,
+    pre_admit: bool = False,
+    pre_admit_secrets: list[str] | None = None,
+    pre_admit_seconds: int = 900,
 ) -> int:
     """`ka unlock`'s foreground body: build state, serve, block until done.
 
@@ -789,6 +991,12 @@ def run_foreground_guard(
     (never the password) and re-opens the vault on a content change — see
     `_maybe_reload_secrets`. Omitting them (as every existing test does)
     keeps the old fixed-at-startup-only behavior.
+
+    `pre_admit` (opt-in, never the default) arms a single-use grant for the
+    very next unrecognized peer within `pre_admit_seconds` — scoped to
+    `pre_admit_secrets` if given, else unscoped ALL secrets. Must be loud:
+    printed here immediately, plus a distinct audit event, *and* announced
+    again at the moment it's actually consumed (see `_check_admission`).
     """
     secrets_map = {k: str(v) for k, v in payload.get("secrets", {}).items()}
     expires_at = time.time() + timeout_minutes * 60
@@ -808,8 +1016,34 @@ def run_foreground_guard(
         vault_key=vault_key,
         vault_content_fingerprint=fingerprint,
     )
+    if pre_admit:
+        scoped_names = set(pre_admit_secrets or ())
+        state.pre_admit_until = time.time() + pre_admit_seconds
+        state.pre_admit_unscoped = not scoped_names
+        state.pre_admit_secrets = scoped_names
+        if scoped_names:
+            theme.warn(
+                f"pre-admitting next client for: {', '.join(sorted(scoped_names))} "
+                f"(window {pre_admit_seconds}s)."
+            )
+            audit_event(
+                "pre-admit-armed",
+                route="guard-session",
+                result="warn",
+                reason=f"scope: {sorted(scoped_names)}",
+            )
+        else:
+            theme.warn(
+                f"pre-admitting next client for ALL {len(secrets_map)} secrets "
+                f"(window {pre_admit_seconds}s)."
+            )
+            audit_event(
+                "pre-admit-armed",
+                route="guard-session",
+                result="warn",
+                reason="scope: ALL (unscoped pre-admit)",
+            )
     write_guard_lock(address, authkey, pid, expires_at)
-    clear_admission_token()
     started_at = state.created_at
 
     theme.success(
@@ -840,7 +1074,6 @@ def run_foreground_guard(
         _write_last_guard_state(reason, started_at, state.request_count)
         state.secrets.clear()
         clear_guard_lock()
-        clear_admission_token()
         try:
             listener.close()
         except Exception:

@@ -10,7 +10,11 @@ from typing import Any, Iterable
 from key_amnesia.paths import audit_log_path
 
 VALID_ROUTES = frozenset({"inline", "spawned-console", "guard-session"})
-VALID_RESULTS = frozenset({"allowed", "denied", "timeout"})
+# "warn" (0.3.8): a detection-only event that isn't itself an allow/deny
+# outcome — e.g. an unrecognized peer showing up at the guard, or a
+# pre-admit window being armed. Written unconditionally, independent of
+# whatever the admission prompt is eventually answered.
+VALID_RESULTS = frozenset({"allowed", "denied", "timeout", "warn"})
 
 
 def _utc_now_iso() -> str:
