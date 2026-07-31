@@ -437,6 +437,18 @@ def _announce_admission(peer: PeerIdentity, session: "AdmittedSession", *, via: 
     )
 
 
+def _release_admitted_handles(state: GuardState) -> None:
+    """Close any Windows OpenProcess handles held by the current admission.
+
+    Safe no-op when nothing is admitted or identities have no handles
+    (Linux / ancestor-walk / legacy opaque-token sessions).
+    """
+    if state.admitted is None:
+        return
+    for ident in state.admitted.identities:
+        ident.release()
+
+
 def _admit_peer(
     state: GuardState,
     peer: PeerIdentity,
@@ -456,7 +468,11 @@ def _admit_peer(
     a deliberate trade-off for a bearer-token-free design — see
     DESIGN.md "Process-tree ancestry admission" — `--pre-admit` exists to
     smooth over a bounded window of expected repeat activity.
+
+    Replacing an existing admission releases any OpenProcess handle held
+    on the previous root (Windows).
     """
+    _release_admitted_handles(state)
     state.admitted = AdmittedSession(
         identities=[peer],
         first_seen=_utc_iso(),
@@ -589,7 +605,9 @@ def _check_admission_legacy(
     `guard_request`) — nothing here is reachable from outside this process.
     """
     token = str(msg.get("admission_token") or "")
-    caller_pid = int(msg.get("caller_pid") or 0)
+    # Attacker-controlled display hint only — never a trust input. Renamed
+    # from `caller_pid` so call sites cannot mistake it for kernel identity.
+    claimed_pid_unverified = int(msg.get("claimed_pid_unverified") or 0)
 
     if state.admitted is not None and token and token == state.admitted.token:
         state.admitted.request_count += 1
@@ -597,13 +615,16 @@ def _check_admission_legacy(
         return True, None
 
     if admit_prompt is not None:
-        approved = bool(admit_prompt(caller_pid, summary))
+        approved = bool(admit_prompt(claimed_pid_unverified, summary))
     else:
-        approved = bool(default_admit_prompt(caller_pid, summary, state.stdin_pump))
+        approved = bool(
+            default_admit_prompt(claimed_pid_unverified, summary, state.stdin_pump)
+        )
     if not approved:
         return False, None
 
     new_token = secrets_mod.token_urlsafe(32)
+    _release_admitted_handles(state)
     state.admitted = AdmittedSession(
         token=new_token,
         first_seen=_utc_iso(),
@@ -622,7 +643,7 @@ def _maybe_reload_secrets(state: GuardState) -> None:
     Fixes the guard's stale in-memory snapshot: `ka set` / `ka remove` from
     another terminal write the vault file directly, but a long-running `ka
     unlock` guard used to decrypt once at startup and never look again (see
-    README security limit 9 / DESIGN.md). Cheap content fingerprint first —
+    README security limit 11 / DESIGN.md). Cheap content fingerprint first —
     only re-opens (SecretBox decrypt with the already-derived key, no
     Argon2id, no password prompt) when that fingerprint actually moved.
 
@@ -1027,6 +1048,7 @@ def guard_serve(state: GuardState, listener: Any) -> str:
         if isinstance(item, Exception):
             continue
         conn = item
+        peer: PeerIdentity | None = None
         try:
             msg = ipc.recv_msg(conn, timeout=30.0)
             verb = str(msg.get("verb") or msg.get("action") or "") if isinstance(msg, dict) else "?"
@@ -1041,6 +1063,17 @@ def guard_serve(state: GuardState, listener: Any) -> str:
         except Exception:
             pass
         finally:
+            # Windows: get_peer_identity holds OpenProcess for the connecting
+            # peer. Keep that handle only if this exact object is the admitted
+            # root we just stored; otherwise close it (descendant / denied /
+            # unrecognized-but-not-admitted connections).
+            if peer is not None:
+                kept = (
+                    state.admitted is not None
+                    and any(peer is ident for ident in state.admitted.identities)
+                )
+                if not kept:
+                    peer.release()
             try:
                 conn.close()
             except Exception:
@@ -1283,6 +1316,8 @@ def run_foreground_guard(
         _write_last_guard_state(
             reason, started_at, state.request_count, path=effective_last
         )
+        _release_admitted_handles(state)
+        state.admitted = None
         state.secrets.clear()
         clear_guard_lock(path=effective_lock)
         if registry_vault is not None:

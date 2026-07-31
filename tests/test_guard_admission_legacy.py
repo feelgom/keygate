@@ -35,12 +35,12 @@ def test_unknown_token_prompts_and_approves(ka_home) -> None:
     state = _state()
     calls: list[tuple[int, str]] = []
 
-    def approve(caller_pid: int, summary: str) -> bool:
-        calls.append((caller_pid, summary))
+    def approve(claimed_pid_unverified: int, summary: str) -> bool:
+        calls.append((claimed_pid_unverified, summary))
         return True
 
     reply = guard_handle_message(
-        {"verb": "list", "caller_pid": 4242},
+        {"verb": "list", "claimed_pid_unverified": 4242},
         state,
         admit_prompt=approve,
     )
@@ -56,7 +56,7 @@ def test_unknown_token_prompts_and_approves(ka_home) -> None:
 def test_unknown_token_denies_on_no(ka_home) -> None:
     state = _state()
     reply = guard_handle_message(
-        {"verb": "list", "caller_pid": 1},
+        {"verb": "list", "claimed_pid_unverified": 1},
         state,
         admit_prompt=lambda pid, summary: False,
     )

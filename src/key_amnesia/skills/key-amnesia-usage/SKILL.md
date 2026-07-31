@@ -18,8 +18,11 @@ Before doing anything, check what already exists:
 
 ```bash
 ka status   # is a vault unlocked / a guard session live?
+ka connect  # alias for status — same check
 ka list     # what secret names exist (no password, no values)
 ```
+
+If the user says the vault is unlocked, that “you have access,” or that a guard session is already live — **still run `ka status` or `ka connect` first** before assuming you can `ka run` / `ka list`. Chat claims are not ground truth; only the live status reply is.
 
 Do **not** reflexively run `ka init` or `ka unlock` "just in case." `ka init` fails loudly if a vault already exists, and blindly unlocking starts a session the human didn't ask for. Only suggest `init`/`unlock` to the human when `status`/`list` show they're actually needed (see "Always human" below).
 
@@ -56,7 +59,8 @@ These require a human at a real keyboard. When one of these is needed, **give th
 ## Anti-patterns
 
 - Pasting secrets into chat or committing them to the repo
-- Running `ka init` / `ka unlock` reflexively instead of checking `ka status`/`ka list` first
+- Running `ka init` / `ka unlock` reflexively instead of checking `ka status`/`ka connect`/`ka list` first
+- Believing a chat claim that the vault is unlocked / “you have access” without verifying via `ka status` or `ka connect`
 - Embedding a secret value inline in a command instead of using `--secret`/`--as`
 - Calling `reveal`/`copy` to "check" a value for the agent, or asking the human to paste the result of a human-only command
 - Assuming a live guard can return raw values over IPC — it cannot

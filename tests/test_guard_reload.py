@@ -3,7 +3,7 @@
 A live `ka unlock` guard used to decrypt once at startup and never look
 again: a `ka set`/`ka remove` from another terminal updated the vault file
 correctly, but the guard kept serving its old in-memory copy for the rest of
-its session (README security limit 9 / DESIGN.md "Known limitation"). These
+its session (README security limit 11 / DESIGN.md "Known limitation"). These
 tests exercise the fix directly against `guard_handle_message` / `GuardState`
 — no live guard process, no IPC listener needed — using the retained
 SecretBox key + content-fingerprint path (`_maybe_reload_secrets`).
