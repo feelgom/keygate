@@ -36,7 +36,7 @@ GitHub wiki page titles come from filenames (`Home.md` → Home,
 | [Commands](Commands.md) | Command reference skeleton |
 | [Roles-and-export](Roles-and-export.md) | KAM2 / export — **needs maintainer judgement** |
 | [Threat-model](Threat-model.md) | Limits + policy vs crypto — **needs maintainer judgement** |
-| [macOS](macOS.md) | Experimental / not yet implemented |
+| [macOS](macOS.md) | Experimental Terminal.app / PID-file spawn (0.4.0) |
 
 ## Maintainer judgement flags
 
