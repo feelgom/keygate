@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "key-amnesia"
-version = "0.4.1"
+version = "0.4.2"
 description = "Encrypted secret vault so AI agents can use API keys without seeing them — a drop-in .env replacement"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -60,3 +60,6 @@ key_amnesia = ["skills/*/SKILL.md", "hooks/*.py"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "slow: process-spawning or otherwise heavy tests; skip with -m 'not slow' for a fast inner loop",
+]

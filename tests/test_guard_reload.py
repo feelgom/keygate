@@ -23,8 +23,9 @@ import time
 
 from key_amnesia import vault as vault_mod
 from key_amnesia.guard import AdmittedSession, GuardState, guard_handle_message
+from key_amnesia.peer_identity import PeerIdentity
 
-ADMITTED_TOKEN = "test-admitted-token"
+PEER = PeerIdentity(pid=4242, start_time=1000)
 
 
 def _admitted_state(vault_path, key, secrets) -> GuardState:
@@ -47,20 +48,23 @@ def _admitted_state(vault_path, key, secrets) -> GuardState:
         vault_content_fingerprint=vault_mod.vault_fingerprint(vault_path),
     )
     state.admitted = AdmittedSession(
-        token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00"
+        identities=[PEER],
+        first_seen="2026-01-01T00:00:00+00:00",
+        unscoped=True,
+        granted_until=state.expires_at,
     )
     return state
 
 
 def _msg(verb: str, **extra) -> dict:
-    return {"verb": verb, "admission_token": ADMITTED_TOKEN, **extra}
+    return {"verb": verb, **extra}
 
 
 def test_set_while_unlocked_is_seen_by_list(ka_home, seeded_vault, password) -> None:
     payload, key = vault_mod.load_vault_with_key(seeded_vault, password)
     state = _admitted_state(seeded_vault, key, payload["secrets"])
 
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert reply["ok"] is True
     assert "new_secret" not in reply["names"]
 
@@ -70,7 +74,7 @@ def test_set_while_unlocked_is_seen_by_list(ka_home, seeded_vault, password) -> 
     mutated["secrets"] = dict(payload["secrets"], new_secret="brand-new-value")
     vault_mod.save_vault(seeded_vault, password, mutated)
 
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert reply["ok"] is True
     assert "new_secret" in reply["names"]
 
@@ -92,6 +96,7 @@ def test_set_while_unlocked_is_seen_by_run(ka_home, seeded_vault, password) -> N
             command=[sys.executable, "-c", code],
         ),
         state,
+        peer=PEER,
     )
     assert reply["ok"] is True
     assert "brand-new-value" not in reply["scrubbed_stdout"]
@@ -102,7 +107,7 @@ def test_remove_while_unlocked_makes_secret_disappear(ka_home, seeded_vault, pas
     payload, key = vault_mod.load_vault_with_key(seeded_vault, password)
     state = _admitted_state(seeded_vault, key, payload["secrets"])
 
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert "api_key" in reply["names"]
 
     mutated = dict(payload)
@@ -111,7 +116,7 @@ def test_remove_while_unlocked_makes_secret_disappear(ka_home, seeded_vault, pas
     }
     vault_mod.save_vault(seeded_vault, password, mutated)
 
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert reply["ok"] is True
     assert "api_key" not in reply["names"]
 
@@ -125,6 +130,7 @@ def test_remove_while_unlocked_makes_secret_disappear(ka_home, seeded_vault, pas
             command=[sys.executable, "-c", "print('unused')"],
         ),
         state,
+        peer=PEER,
     )
     assert reply["ok"] is False
     assert "unknown secrets" in reply["reason"]
@@ -149,7 +155,7 @@ def test_reload_driven_by_fingerprint_not_unconditional(
 
     # Unchanged vault: repeated status/list calls must not re-decrypt.
     for _ in range(3):
-        reply = guard_handle_message(_msg("status"), state)
+        reply = guard_handle_message(_msg("status"), state, peer=PEER)
         assert reply["ok"] is True
     assert calls == []
 
@@ -160,7 +166,7 @@ def test_reload_driven_by_fingerprint_not_unconditional(
     vault_mod.save_vault(seeded_vault, password, mutated)
 
     for _ in range(3):
-        reply = guard_handle_message(_msg("list"), state)
+        reply = guard_handle_message(_msg("list"), state, peer=PEER)
         assert reply["ok"] is True
     assert calls == [1]
 
@@ -183,14 +189,14 @@ def test_reload_survives_transient_read_error(
 
     monkeypatch.setattr(vault_mod, "load_vault_with_retained_key", boom)
 
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert reply["ok"] is True
     # Reload failed silently; last-known-good (pre-mutation) names remain.
     assert "will_not_appear_yet" not in reply["names"]
     assert "api_key" in reply["names"]
 
     monkeypatch.undo()
-    reply = guard_handle_message(_msg("list"), state)
+    reply = guard_handle_message(_msg("list"), state, peer=PEER)
     assert "will_not_appear_yet" in reply["names"]
 
 
@@ -205,10 +211,13 @@ def test_guard_state_without_vault_path_skips_reload(ka_home) -> None:
         authkey=b"s" * 32,
     )
     state.admitted = AdmittedSession(
-        token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00"
+        identities=[PEER],
+        first_seen="2026-01-01T00:00:00+00:00",
+        unscoped=True,
+        granted_until=state.expires_at,
     )
     for verb in ("list", "status"):
-        reply = guard_handle_message(_msg(verb), state)
+        reply = guard_handle_message(_msg(verb), state, peer=PEER)
         assert reply["ok"] is True
     assert state.secrets == {"api_key": "unchanged"}
 
@@ -225,7 +234,7 @@ def test_reload_never_returns_raw_secret_value(ka_home, seeded_vault, password) 
         ("list", {}),
         ("status", {}),
     ):
-        reply = guard_handle_message(_msg(verb, **extra), state)
+        reply = guard_handle_message(_msg(verb, **extra), state, peer=PEER)
         assert "freshly-rotated-value" not in str(reply)
         assert "password" not in reply
         assert "secrets" not in reply
@@ -239,6 +248,7 @@ def test_reload_never_returns_raw_secret_value(ka_home, seeded_vault, password) 
             command=[sys.executable, "-c", code],
         ),
         state,
+        peer=PEER,
     )
     assert reply["ok"] is True
     assert "freshly-rotated-value" not in str(reply)

@@ -85,6 +85,24 @@ def test_migration_aborts_if_confirm_declined(ka_home: Path, password: str) -> N
     assert not roles.kam1_backup_path(vault).exists()
 
 
+def test_migration_requires_confirm_even_with_announce(
+    ka_home: Path, password: str
+) -> None:
+    """announce= alone must never migrate — confirm= is mandatory unconditionally."""
+    vault = ka_home / "vault.bin"
+    _seed_kam1(vault, password, {"a": "1"})
+    before = vault.read_bytes()
+
+    with pytest.raises(roles.RolesError, match="explicit confirm"):
+        roles.migrate_kam1_to_kam2(
+            vault, password, confirm=None, announce=lambda _m: None
+        )
+
+    assert vault.read_bytes() == before
+    assert detect_vault_magic(vault) == MAGIC_KAM1
+    assert not roles.kam1_backup_path(vault).exists()
+
+
 def test_runner_denies_reveal(ka_home: Path, password: str, monkeypatch, capsys) -> None:
     vault = ka_home / "vault.bin"
     _seed_kam1(vault, password, {"api_key": "super-secret-value-123"})

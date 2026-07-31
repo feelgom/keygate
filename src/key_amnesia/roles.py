@@ -214,12 +214,10 @@ def migrate_kam1_to_kam2(
     )
     if announce:
         announce(msg)
-    if confirm is not None:
-        if not confirm(msg):
-            raise RolesError("Roles enable cancelled — vault left on KAM1")
-    elif announce is None:
-        # Non-interactive callers must pass confirm= explicitly.
-        raise RolesError("Roles enable requires confirmation")
+    if confirm is None:
+        raise RolesError("Roles enable requires an explicit confirm= callback")
+    if not confirm(msg):
+        raise RolesError("Roles enable cancelled — vault left on KAM1")
 
     # Snapshot live bytes, write backup, verify decrypt.
     live_bytes = vault.read_bytes()

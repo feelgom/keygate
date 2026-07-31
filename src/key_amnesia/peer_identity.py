@@ -17,7 +17,9 @@ authenticated IPC connection:
   Ancestor-chain walks still open-read-close (they are not the admitted
   root and do not need a long-lived handle).
 - Linux: `SO_PEERCRED` on the connected socket (kernel-verified pid/uid/gid
-  at accept time — considerably stronger than the Windows path), then an
+  at accept time — considerably stronger than the Windows path). The kernel
+  uid is compared to `os.geteuid()` and a mismatch raises
+  `PeerIdentityError` (fail-closed `None` from `get_peer_identity`); then an
   immediate `/proc/<pid>/stat` read for the same creation-time comparison.
 - Anything else (macOS, unknown platforms): unsupported — returns `None`,
   which callers must treat as an unrecognized peer (fail closed), exactly
@@ -30,6 +32,7 @@ this module.
 
 from __future__ import annotations
 
+import os
 import struct
 import sys
 from dataclasses import dataclass, field
@@ -172,8 +175,8 @@ def _win_get_peer_identity(conn: Connection) -> PeerIdentity:
     return _win_identity_for_pid(int(client_pid.value), hold=True)
 
 
-def _win_parent_pid(pid: int) -> int | None:
-    """Best-effort immediate parent pid via a process snapshot.
+def _win_ppid_map() -> dict[int, int]:
+    """One-shot `{pid: ppid}` map from a single process snapshot.
 
     `th32ParentProcessID` is recorded once at process creation and is never
     updated by Windows if the real parent later exits — a stale/possibly
@@ -202,22 +205,31 @@ def _win_parent_pid(pid: int) -> int | None:
 
     snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)  # type: ignore[attr-defined]
     if snap in (0, INVALID_HANDLE_VALUE, None):
-        return None
+        return {}
     try:
         entry = PROCESSENTRY32()
         entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
         if not ctypes.windll.kernel32.Process32First(snap, ctypes.byref(entry)):  # type: ignore[attr-defined]
-            return None
+            return {}
+        out: dict[int, int] = {}
         while True:
-            if entry.th32ProcessID == pid:
-                return int(entry.th32ParentProcessID)
+            out[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
             if not ctypes.windll.kernel32.Process32Next(snap, ctypes.byref(entry)):  # type: ignore[attr-defined]
-                return None
+                break
+        return out
     finally:
         ctypes.windll.kernel32.CloseHandle(snap)  # type: ignore[attr-defined]
 
 
 def _win_ancestor_chain(pid: int, max_depth: int) -> list[PeerIdentity]:
+    """Walk parents using one CreateToolhelp32Snapshot; start_time via OpenProcess.
+
+    Snapshot once → `{pid: ppid}` map, then walk in memory. Per-node
+    `(pid, start_time)` still comes from `_win_identity_for_pid` (OpenProcess
+    + GetProcessTimes), not from the snapshot. Residual caveat:
+    `th32ParentProcessID` is fixed at creation time (see `_win_ppid_map`).
+    """
+    ppid_by_pid = _win_ppid_map()
     chain: list[PeerIdentity] = []
     seen: set[int] = set()
     current: int | None = pid
@@ -229,7 +241,7 @@ def _win_ancestor_chain(pid: int, max_depth: int) -> list[PeerIdentity]:
             chain.append(_win_identity_for_pid(current))
         except PeerIdentityError:
             break
-        parent = _win_parent_pid(current)
+        parent = ppid_by_pid.get(current)
         if parent is None or parent == current:
             break
         current = parent
@@ -279,7 +291,12 @@ def _linux_get_peer_identity(conn: Connection) -> PeerIdentity:
         raise PeerIdentityError(f"SO_PEERCRED failed: {e}") from e
     finally:
         sock.detach()  # never close the caller's fd
-    pid, _uid, _gid = struct.unpack("3i", raw)
+    pid, uid, _gid = struct.unpack("3i", raw)
+    euid = os.geteuid()
+    if uid != euid:
+        raise PeerIdentityError(
+            f"SO_PEERCRED uid {uid} != geteuid {euid}"
+        )
     return _linux_identity_for_pid(pid)
 
 

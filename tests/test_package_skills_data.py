@@ -16,6 +16,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+pytestmark = pytest.mark.slow
+
 EXPECTED_SKILL_MEMBERS = [
     "key_amnesia/skills/key-amnesia-usage/SKILL.md",
     "key_amnesia/skills/key-amnesia-hygiene/SKILL.md",

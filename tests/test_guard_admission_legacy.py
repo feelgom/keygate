@@ -1,12 +1,11 @@
 """Pre-0.3.8 opaque-token admission path (`_check_admission_legacy`).
 
-Kept alive purely so `guard_handle_message` remains callable exactly as it
-was before kernel peer identity, for any caller that constructs a message
-by hand and never supplies a `peer` kwarg. `guard_serve` — the only
-production dispatch path — always supplies a real `peer`, so this legacy
-path never runs against a live guard, and there is no on-disk token file
-involved anywhere in 0.3.8 (see `guard_request`, which no longer attaches
-or persists anything admission-related).
+Kept alive via `guard_handle_message_legacy` (aliased below so call sites
+stay unchanged). `guard_serve` — the only production dispatch path — always
+supplies a real `peer`, so this legacy path never runs against a live guard,
+and there is no on-disk token file involved anywhere in 0.3.8 (see
+`guard_request`, which no longer attaches or persists anything
+admission-related).
 """
 
 from __future__ import annotations
@@ -16,8 +15,8 @@ import time
 from key_amnesia.guard import (
     AdmittedSession,
     GuardState,
-    guard_handle_message,
 )
+from key_amnesia.guard import guard_handle_message_legacy as guard_handle_message
 
 
 def _state(**overrides) -> GuardState:

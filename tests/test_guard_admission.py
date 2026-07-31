@@ -12,8 +12,8 @@ were actually granted.
 These tests exercise `_check_admission`'s kernel-identity path by passing a
 `peer=PeerIdentity(...)` kwarg to `guard_handle_message`, exactly as
 `guard_serve` does in production. Legacy in-memory opaque-token behavior
-(for callers that omit `peer` entirely) is covered separately in
-`test_guard_admission_legacy.py`.
+is covered separately in `test_guard_admission_legacy.py` via
+`guard_handle_message_legacy`.
 """
 
 from __future__ import annotations
