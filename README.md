@@ -91,11 +91,11 @@ ka lock                             # end it early, any time
 
 | Command | What it does |
 |---------|--------------|
-| `ka init` | Create an empty vault (type master password twice; refuse if already exists) |
+| `ka init [--project] [--env NAME]` | Create an empty vault (type master password twice; refuse if already exists). `--project` creates `./.amnesia/vault.bin` (or `envs/NAME/`), writes `.amnesia/config.json`, and auto-adds `.amnesia/` to `.gitignore` |
 | `ka passwd` / `ka change-password` | Change the master password (re-encrypts the vault with a fresh salt; refuses while a session is active) |
 | `ka set NAME` | Store or update a secret (value typed hidden; password required; vault must already exist) |
 | `ka remove NAME` | Delete a secret (password required) |
-| `ka import FILE` | Import a dotenv-format file's `NAME=value` pairs into the vault (TTY-only, like `ka init`) — asks before overwriting a name that already exists, and offers to delete/rename the source file, add `.env*` to `.gitignore`, and generate/merge a minimal `amnesia.toml` |
+| `ka import FILE` | Import a dotenv-format file's `NAME=value` pairs into the resolved vault (project vault when inside a project; TTY-only) — asks before overwriting a name that already exists, and offers to delete/rename the source file, add `.env*` to `.gitignore`, and generate/merge a minimal `amnesia.toml` |
 | `ka run --secret NAME --as ENV_VAR -- <command>` | Run a command with the secret injected; output censored. The agent-facing command. |
 | `ka list` | Show secret *names* only — never values; safe for agents, no prompt |
 | `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start a cached session; `--pre-admit` loudly auto-admits the very next connecting process for a bounded window (15m default), without a yes/no prompt — scope it to specific secrets with `--pre-admit-secret`, repeatable, or leave it off for ALL secrets |
@@ -103,8 +103,24 @@ ka lock                             # end it early, any time
 | `ka reveal NAME` | Show a value to *you* (password required every time, even mid-session) |
 | `ka copy NAME` | Copy a value to your clipboard instead of showing it (same rule) |
 | `ka config show` / `ka config set KEY VALUE` | View / change settings (changes require your password) |
-| `ka status` (alias `ka connect`) | Is a session active, and until when — plus, if not, what happened to the last one |
+| `ka status` (alias `ka connect`) | Is a session active, and until when — plus, if not, what happened to the last one; lists other live guards from the discovery registry |
 | `ka setup` | Install agent skills + the secret-guard hook for Claude Code / Cursor (`--skills-only` / `--hook-only`) |
+
+Vault-aware commands also accept `--vault PATH`, `--global`, `--no-global`, and `--env NAME` to select which vault to use.
+
+### Project vaults (since 0.3.10)
+
+```bash
+# Inside a git repo / project directory:
+ka init --project          # creates .amnesia/vault.bin + config.json; gitignores .amnesia/
+ka import .env             # lands in the project vault when .amnesia/ is found
+ka unlock                  # prompts for project password, then (if use_global) global password
+ka run --secret API_KEY -- ...
+```
+
+Walk-up from cwd finds the nearest `.amnesia/` (stops at your home directory). By default the project vault **merges** with the global `~/.key-amnesia` vault (project wins on name collision); set `"use_global": false` in `.amnesia/config.json` or pass `--no-global` to isolate. Per-environment vaults live at `.amnesia/envs/<name>/vault.bin` (`--env NAME` or `KA_ENV`). Existing global-only setups need no migration — no `.amnesia/` means everything stays global.
+
+Daily use: **one `ka unlock` per project vault**. Guard lock + death-state files sit beside the active vault; a discovery-only registry at `~/.key-amnesia/guards/` lists live guards (address/pid/expiry — **never** the authkey).
 
 Every command supports `--help`.
 

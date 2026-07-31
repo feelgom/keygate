@@ -53,5 +53,24 @@ def last_guard_state_path() -> Path:
     return data_dir() / "last_guard_state.json"
 
 
+def guard_lock_path_for_vault(vault: Path | str) -> Path:
+    """`guard.lock` beside the vault file (project or global)."""
+    return Path(vault).resolve().parent / "guard.lock"
+
+
+def last_guard_state_path_for_vault(vault: Path | str) -> Path:
+    """`last_guard_state.json` beside the vault file."""
+    return Path(vault).resolve().parent / "last_guard_state.json"
+
+
+def guards_registry_dir() -> Path:
+    """Discovery-only registry of live guards (`~/.key-amnesia/guards/`).
+
+    Entries never carry authkeys — those stay only in the vault-adjacent lock.
+    Does not create the directory (callers that write should mkdir).
+    """
+    return data_dir() / "guards"
+
+
 def audit_log_path() -> Path:
     return data_dir() / "audit.log"

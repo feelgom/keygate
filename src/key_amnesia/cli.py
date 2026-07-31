@@ -17,6 +17,13 @@ from key_amnesia import dotenv_import
 from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
+from key_amnesia.project import (
+    VaultContext,
+    ensure_project_scaffold,
+    merge_secret_maps,
+    merged_names_from_sidecars,
+    resolve_vault_context,
+)
 from key_amnesia.prompt_route import PromptRequest, require_human_auth
 from key_amnesia.setup_cmd import cmd_setup
 from key_amnesia import theme
@@ -41,6 +48,48 @@ def _write_command_output(stream: Any, text: str) -> None:
         stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
+def _add_vault_scope_args(parser: argparse.ArgumentParser) -> None:
+    """`--vault` / `--global` / `--no-global` / `--env` on vault-aware commands."""
+    parser.add_argument(
+        "--vault",
+        default=None,
+        metavar="PATH",
+        help="Use this vault file directly (skips project discovery)",
+    )
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument(
+        "--global",
+        dest="force_global",
+        action="store_true",
+        help="Force the global ~/.key-amnesia vault (ignore project)",
+    )
+    g.add_argument(
+        "--no-global",
+        dest="no_global",
+        action="store_true",
+        help="Do not merge the global vault into a project unlock/run/list",
+    )
+    parser.add_argument(
+        "--env",
+        default=None,
+        metavar="NAME",
+        help="Project environment vault (.amnesia/envs/NAME/); also KA_ENV",
+    )
+
+
+def _ctx_from_args(args: argparse.Namespace) -> VaultContext:
+    try:
+        return resolve_vault_context(
+            vault=getattr(args, "vault", None),
+            force_global=bool(getattr(args, "force_global", False)),
+            no_global=bool(getattr(args, "no_global", False)),
+            env=getattr(args, "env", None),
+        )
+    except ValueError as e:
+        theme.error(f"Error: {e}")
+        raise SystemExit(2) from e
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="key-amnesia",
@@ -52,17 +101,29 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     # init
-    sub.add_parser(
+    p_init = sub.add_parser(
         "init",
         help="Create an empty vault (double-confirm master password)",
     )
+    p_init.add_argument(
+        "--project",
+        action="store_true",
+        help="Create a project vault in ./.amnesia/ (auto-gitignores .amnesia/)",
+    )
+    p_init.add_argument(
+        "--env",
+        default=None,
+        metavar="NAME",
+        help="With --project: create .amnesia/envs/NAME/vault.bin",
+    )
 
     # passwd / change-password
-    sub.add_parser(
+    p_passwd = sub.add_parser(
         "passwd",
         aliases=["change-password"],
         help="Change the master password (re-encrypts the vault with a fresh salt)",
     )
+    _add_vault_scope_args(p_passwd)
 
     # set
     p_set = sub.add_parser("set", help="Store or update a secret (always fresh auth)")
@@ -73,10 +134,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Secret value (prompted if omitted; never prefer argv for secrets)",
     )
+    _add_vault_scope_args(p_set)
 
     # remove
     p_rm = sub.add_parser("remove", help="Remove a secret (always fresh auth)")
     p_rm.add_argument("name", help="Secret name")
+    _add_vault_scope_args(p_rm)
 
     # import
     p_import = sub.add_parser(
@@ -84,6 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Import secrets from a dotenv file into the vault (TTY-only)",
     )
     p_import.add_argument("file", help="Path to a dotenv-format file, e.g. .env")
+    _add_vault_scope_args(p_import)
 
     # run
     p_run = sub.add_parser(
@@ -116,6 +180,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="LABEL",
         help="Display-only client label shown in the guard's admission prompt",
     )
+    _add_vault_scope_args(p_run)
 
     # list
     p_list = sub.add_parser("list", help="List secret names (no prompt; names sidecar)")
@@ -125,6 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="LABEL",
         help="Display-only client label shown in the guard's admission prompt",
     )
+    _add_vault_scope_args(p_list)
 
     # unlock / lock
     p_unlock = sub.add_parser("unlock", help="Start cached guard session (requires password)")
@@ -146,6 +212,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "unscoped ALL-secrets pre-admit"
         ),
     )
+    _add_vault_scope_args(p_unlock)
     p_lock = sub.add_parser("lock", help="Tear down cached guard session")
     p_lock.add_argument(
         "--name",
@@ -153,12 +220,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="LABEL",
         help="Display-only client label shown in the guard's admission prompt",
     )
+    _add_vault_scope_args(p_lock)
 
     # reveal / copy
     p_rev = sub.add_parser("reveal", help="Reveal a secret (always fresh auth)")
     p_rev.add_argument("name", help="Secret name")
+    _add_vault_scope_args(p_rev)
     p_copy = sub.add_parser("copy", help="Copy a secret to clipboard (always fresh auth)")
     p_copy.add_argument("name", help="Secret name")
+    _add_vault_scope_args(p_copy)
 
     # config
     p_cfg = sub.add_parser("config", help="View or set configuration")
@@ -186,6 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="LABEL",
         help="Display-only client label shown in the guard's admission prompt",
     )
+    _add_vault_scope_args(p_status)
     p_connect = sub.add_parser(
         "connect",
         help="Alias for 'status' (no separate guard verb — same status check)",
@@ -196,6 +267,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="LABEL",
         help="Display-only client label shown in the guard's admission prompt",
     )
+    _add_vault_scope_args(p_connect)
 
     # setup (agent distribution: skills + PreToolUse/preToolUse hook)
     p_setup = sub.add_parser(
@@ -260,8 +332,19 @@ def _confirm(prompt: str, *, default: bool = False) -> bool:
     return answer in ("y", "yes")
 
 
-def cmd_init(_args: argparse.Namespace) -> int:
-    vp = vault_path()
+def cmd_init(args: argparse.Namespace) -> int:
+    project = bool(getattr(args, "project", False))
+    env_name = getattr(args, "env", None)
+    if env_name and not project:
+        theme.error("Error: --env requires --project")
+        return 2
+
+    if project:
+        project_root = Path.cwd()
+        vp = ensure_project_scaffold(project_root, env_name=env_name, use_global=True)
+    else:
+        vp = vault_path()
+
     if vp.exists():
         theme.error(
             "vault already initialized, use ka set to add secrets",
@@ -282,6 +365,12 @@ def cmd_init(_args: argparse.Namespace) -> int:
         theme.error(f"Error: {e}")
         return 1
     theme.success(f"Vault initialized at {vp}")
+    if project:
+        theme.info("Added .amnesia/ to .gitignore (if not already covered).")
+        theme.info(
+            "Project vault merges the global vault by default "
+            "(use --no-global to isolate; set use_global in .amnesia/config.json)."
+        )
     theme.info(
         "Remember your master password — it cannot be recovered if forgotten."
     )
@@ -301,12 +390,12 @@ def _auth_password(request: PromptRequest) -> tuple[bool, str | None, Any]:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
+    ctx = _ctx_from_args(args)
     name = args.name
     value = args.value
-    if not vault_path().exists():
-        theme.error(
-            "Vault not initialized. Run 'ka init' first.",
-        )
+    if not ctx.vault_path.exists():
+        hint = "ka init --project" if ctx.project_root else "ka init"
+        theme.error(f"Vault not initialized. Run '{hint}' first.")
         return 1
     # Prefer not putting secret values on argv — if omitted, prompt (inline only)
     # `mutation` (not `detail`!) carries the value — detail is human-facing
@@ -315,6 +404,7 @@ def cmd_set(args: argparse.Namespace) -> int:
         action="set",
         secret_names=[name],
         mutation=json.dumps({"name": name, "value": value}) if value is not None else "",
+        vault_path=str(ctx.vault_path),
     )
     # If value missing and interactive, collect value after password inline.
     ok, password, outcome = _auth_password(request)
@@ -327,7 +417,7 @@ def cmd_set(args: argparse.Namespace) -> int:
         if value is None:
             value = getpass.getpass(f"Value for '{name}': ")
         try:
-            payload = load_vault(None, password)
+            payload = load_vault(ctx.vault_path, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             audit_event(
@@ -339,7 +429,7 @@ def cmd_set(args: argparse.Namespace) -> int:
             )
             return 1
         payload["secrets"][name] = value
-        save_vault(None, password, payload)
+        save_vault(ctx.vault_path, password, payload)
         audit_event(
             "set",
             secret_names=[name],
@@ -364,8 +454,13 @@ def cmd_set(args: argparse.Namespace) -> int:
 
 
 def cmd_remove(args: argparse.Namespace) -> int:
+    ctx = _ctx_from_args(args)
     name = args.name
-    request = PromptRequest(action="remove", secret_names=[name])
+    request = PromptRequest(
+        action="remove",
+        secret_names=[name],
+        vault_path=str(ctx.vault_path),
+    )
     ok, password, outcome = _auth_password(request)
     if not ok:
         theme.error(f"Denied: {outcome.reason}")
@@ -373,7 +468,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
     if password is not None:
         try:
-            payload = load_vault(None, password)
+            payload = load_vault(ctx.vault_path, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             return 1
@@ -388,7 +483,7 @@ def cmd_remove(args: argparse.Namespace) -> int:
             )
             return 1
         del payload["secrets"][name]
-        save_vault(None, password, payload)
+        save_vault(ctx.vault_path, password, payload)
         audit_event(
             "remove", secret_names=[name], route=outcome.route, result="allowed"
         )
@@ -425,9 +520,11 @@ def cmd_import(args: argparse.Namespace) -> int:
         theme.error(f"Error: file not found: {src}")
         return 1
 
-    vp = vault_path()
+    ctx = _ctx_from_args(args)
+    vp = ctx.vault_path
     if not vp.exists():
-        theme.error("Vault not initialized. Run 'ka init' first.")
+        hint = "ka init --project" if ctx.project_root else "ka init"
+        theme.error(f"Vault not initialized. Run '{hint}' first.")
         return 1
 
     entries = dotenv_import.parse_dotenv(src)
@@ -490,8 +587,9 @@ def cmd_import(args: argparse.Namespace) -> int:
     else:
         theme.info(f"Left {src} in place.")
 
+    root = ctx.project_root or Path.cwd()
     added_gitignore = dotenv_import.offer_gitignore(
-        Path.cwd(),
+        root,
         ask=lambda: _confirm(
             "Add '.env*' to .gitignore so these files are never committed?"
         ),
@@ -499,13 +597,45 @@ def cmd_import(args: argparse.Namespace) -> int:
     if added_gitignore:
         theme.success("Added '.env*' to .gitignore.")
 
-    manifest_path = dotenv_import.generate_or_merge_manifest(imported, Path.cwd())
+    manifest_path = dotenv_import.generate_or_merge_manifest(imported, root)
     theme.info(f"Manifest updated: {manifest_path}")
 
     return 0
 
 
+def _load_merged_secrets(
+    ctx: VaultContext,
+    password: str,
+    *,
+    prompt_global: bool = True,
+) -> dict[str, str] | None:
+    """Decrypt active vault; if merge enabled, prompt for a second (global) password.
+
+    Returns merged secrets map, or None on error (already reported).
+    """
+    try:
+        payload = load_vault(ctx.vault_path, password)
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        return None
+    secrets = {k: str(v) for k, v in payload.get("secrets", {}).items()}
+    if not ctx.merge_with_global or ctx.global_vault_path is None:
+        return secrets
+    if not prompt_global:
+        return secrets
+    theme.info("Global vault also configured — enter its master password (separate).")
+    global_pw = getpass.getpass("Global vault master password: ")
+    try:
+        g_payload = load_vault(ctx.global_vault_path, global_pw)
+    except VaultError as e:
+        theme.error(f"Error decrypting global vault: {e}")
+        return None
+    g_secrets = {k: str(v) for k, v in g_payload.get("secrets", {}).items()}
+    return merge_secret_maps(g_secrets, secrets)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    ctx = _ctx_from_args(args)
     cmd = list(args.cmd or [])
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
@@ -526,7 +656,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Try live guard first (cached mode).
     from key_amnesia.guard import guard_is_alive, guard_request
 
-    if guard_is_alive():
+    if guard_is_alive(path=ctx.lock_path):
         resp = guard_request(
             {
                 "verb": "run",
@@ -536,6 +666,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "cwd": os.getcwd(),
             },
             timeout=3600,
+            lock_path=ctx.lock_path,
         )
         if resp and resp.get("ok"):
             _write_command_output(sys.stdout, resp.get("scrubbed_stdout", ""))
@@ -555,7 +686,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         secret_names=secret_names,
         command=cmd,
         inject_as=inject_as,
-        vault_path=str(vault_path()),
+        vault_path=str(ctx.vault_path),
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
@@ -565,20 +696,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     if password is not None:
         from key_amnesia.run_exec import run_with_secrets
 
-        try:
-            payload = load_vault(None, password)
-        except VaultError as e:
-            theme.error(f"Error: {e}")
+        secrets_map = _load_merged_secrets(ctx, password)
+        if secrets_map is None:
             audit_event(
                 "run",
                 secret_names=secret_names,
                 command=cmd,
                 route=outcome.route,
                 result="denied",
-                reason=str(e),
+                reason="vault decrypt failed",
             )
             return 1
-        secrets_map = {k: str(v) for k, v in payload["secrets"].items()}
         missing = [n for n in secret_names if n not in secrets_map]
         if missing:
             theme.error(f"Unknown secrets: {', '.join(missing)}")
@@ -606,18 +734,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_list(_args: argparse.Namespace) -> int:
+def cmd_list(args: argparse.Namespace) -> int:
+    ctx = _ctx_from_args(args)
     # Prefer live guard names if available; else sidecar (no prompt).
     from key_amnesia.guard import guard_is_alive, guard_request
 
-    if guard_is_alive():
-        resp = guard_request({"verb": "list"})
+    if guard_is_alive(path=ctx.lock_path):
+        resp = guard_request({"verb": "list"}, lock_path=ctx.lock_path)
         if resp and resp.get("ok"):
             names = list(resp.get("names") or [])
             for n in names:
                 theme.out(n)
             return 0
-    names = read_names()
+    if ctx.merge_with_global:
+        names = merged_names_from_sidecars(ctx)
+    else:
+        names = read_names(ctx.names_path)
     for n in names:
         theme.out(n)
     return 0
@@ -631,11 +763,18 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     console — but a spawned helper console refuses the unlock action itself
     (a separate console can't become this terminal's foreground guard).
     """
-    from key_amnesia.guard import guard_is_alive, run_foreground_guard
+    from key_amnesia.guard import VaultSource, guard_is_alive, run_foreground_guard
 
-    if guard_is_alive():
+    ctx = _ctx_from_args(args)
+
+    if guard_is_alive(path=ctx.lock_path):
         theme.warn("Guard session already active.")
         return 0
+
+    if not ctx.vault_path.exists():
+        hint = "ka init --project" if ctx.project_root else "ka init"
+        theme.error(f"Vault not initialized. Run '{hint}' first.")
+        return 1
 
     cfg = load_config()
     timeout_min = int(cfg.get("session-timeout-minutes", 30))
@@ -649,7 +788,7 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     request = PromptRequest(
         action="unlock",
         detail=detail,
-        vault_path=str(vault_path()),
+        vault_path=str(ctx.vault_path),
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
@@ -658,13 +797,41 @@ def cmd_unlock(args: argparse.Namespace) -> int:
 
     if password is not None:
         try:
-            payload, vkey = load_vault_with_key(None, password)
+            payload, vkey = load_vault_with_key(ctx.vault_path, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             audit_event(
                 "unlock", route=outcome.route, result="denied", reason=str(e)
             )
             return 1
+
+        sources: list[VaultSource] | None = None
+        if ctx.merge_with_global and ctx.global_vault_path is not None:
+            theme.info(
+                "Global vault also configured — enter its master password (separate)."
+            )
+            global_pw = getpass.getpass("Global vault master password: ")
+            try:
+                g_payload, g_key = load_vault_with_key(
+                    ctx.global_vault_path, global_pw
+                )
+            except VaultError as e:
+                theme.error(f"Error decrypting global vault: {e}")
+                audit_event(
+                    "unlock", route=outcome.route, result="denied", reason=str(e)
+                )
+                return 1
+            sources = [
+                VaultSource(path=ctx.global_vault_path, key=g_key),
+                VaultSource(path=ctx.vault_path, key=vkey),
+            ]
+            merged = merge_secret_maps(
+                {k: str(v) for k, v in g_payload.get("secrets", {}).items()},
+                {k: str(v) for k, v in payload.get("secrets", {}).items()},
+            )
+            payload = dict(payload)
+            payload["secrets"] = merged
+
         audit_event("unlock", route=outcome.route, result="allowed")
         # Retain only the derived key (never the password) so the guard can
         # reload the vault on a content change without a fresh Argon2id run
@@ -672,8 +839,13 @@ def cmd_unlock(args: argparse.Namespace) -> int:
         return run_foreground_guard(
             payload,
             timeout_min,
-            vault_path=vault_path(),
+            vault_path=ctx.vault_path,
             vault_key=vkey,
+            vault_sources=sources,
+            lock_path=ctx.lock_path,
+            last_guard_state_path=ctx.last_guard_state_path,
+            project_root=str(ctx.project_root) if ctx.project_root else None,
+            env_name=ctx.env_name,
             pre_admit=pre_admit,
             pre_admit_secrets=pre_admit_secrets,
             pre_admit_seconds=pre_admit_seconds,
@@ -683,7 +855,7 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_lock(_args: argparse.Namespace) -> int:
+def cmd_lock(args: argparse.Namespace) -> int:
     from key_amnesia.guard import (
         clear_guard_lock,
         format_no_guard_message,
@@ -691,12 +863,14 @@ def cmd_lock(_args: argparse.Namespace) -> int:
         guard_request,
     )
 
-    if not guard_is_alive():
-        clear_guard_lock()
-        theme.info(format_no_guard_message())
+    ctx = _ctx_from_args(args)
+
+    if not guard_is_alive(path=ctx.lock_path):
+        clear_guard_lock(path=ctx.lock_path)
+        theme.info(format_no_guard_message(path=ctx.last_guard_state_path))
         return 0
-    resp = guard_request({"verb": "lock"})
-    clear_guard_lock()
+    resp = guard_request({"verb": "lock"}, lock_path=ctx.lock_path)
+    clear_guard_lock(path=ctx.lock_path)
     if resp and resp.get("ok"):
         theme.success("Locked.")
         return 0
@@ -705,12 +879,13 @@ def cmd_lock(_args: argparse.Namespace) -> int:
 
 
 def cmd_reveal(args: argparse.Namespace) -> int:
-    # Always fresh auth — never guard shortcut.
+    # Always fresh auth — never guard shortcut. Single vault (no merge).
+    ctx = _ctx_from_args(args)
     name = args.name
     request = PromptRequest(
         action="reveal",
         secret_names=[name],
-        vault_path=str(vault_path()),
+        vault_path=str(ctx.vault_path),
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
@@ -719,7 +894,7 @@ def cmd_reveal(args: argparse.Namespace) -> int:
 
     if password is not None:
         try:
-            payload = load_vault(None, password)
+            payload = load_vault(ctx.vault_path, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             return 1
@@ -743,11 +918,12 @@ def cmd_reveal(args: argparse.Namespace) -> int:
 
 
 def cmd_copy(args: argparse.Namespace) -> int:
+    ctx = _ctx_from_args(args)
     name = args.name
     request = PromptRequest(
         action="copy",
         secret_names=[name],
-        vault_path=str(vault_path()),
+        vault_path=str(ctx.vault_path),
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
@@ -758,7 +934,7 @@ def cmd_copy(args: argparse.Namespace) -> int:
         from key_amnesia.clipboard import copy_to_clipboard
 
         try:
-            payload = load_vault(None, password)
+            payload = load_vault(ctx.vault_path, password)
         except VaultError as e:
             theme.error(f"Error: {e}")
             return 1
@@ -838,23 +1014,39 @@ def _format_remaining(expires_at_epoch: Any) -> str | None:
     return f"{minutes}m {seconds}s"
 
 
-def cmd_status(_args: argparse.Namespace) -> int:
+def cmd_status(args: argparse.Namespace) -> int:
     from key_amnesia.guard import (
         format_no_guard_message,
         guard_is_alive,
         guard_request,
+        list_guard_registry_entries,
         read_guard_lock,
     )
 
-    lock = read_guard_lock()
-    if not lock or not guard_is_alive(lock):
+    ctx = _ctx_from_args(args)
+
+    lock = read_guard_lock(path=ctx.lock_path)
+    if not lock or not guard_is_alive(lock, path=ctx.lock_path):
         theme.out("guard: inactive")
-        theme.out(format_no_guard_message())
+        theme.out(format_no_guard_message(path=ctx.last_guard_state_path))
         cfg = load_config()
         theme.out(f"session-mode: {cfg.get('session-mode')}")
+        if ctx.project_root:
+            theme.out(f"project: {ctx.project_root}")
+            theme.out(f"vault: {ctx.vault_path}")
+            theme.out(f"merge_global: {'yes' if ctx.merge_with_global else 'no'}")
+        others = list_guard_registry_entries()
+        for entry in others:
+            theme.out(
+                f"other_guard: pid={entry.get('pid')} vault={entry.get('vault_path')}"
+            )
         return 0
-    resp = guard_request({"verb": "status"})
+    resp = guard_request({"verb": "status"}, lock_path=ctx.lock_path)
     theme.out("guard: active")
+    if ctx.project_root:
+        theme.out(f"project: {ctx.project_root}")
+        theme.out(f"vault: {ctx.vault_path}")
+        theme.out(f"merge_global: {'yes' if ctx.merge_with_global else 'no'}")
     if resp and resp.get("ok"):
         theme.out(f"pid: {resp.get('pid')}")
         theme.out(f"expires_at: {resp.get('expires_at')}")
@@ -881,10 +1073,19 @@ def cmd_status(_args: argparse.Namespace) -> int:
         remaining = _format_remaining(lock.get("expires_at_epoch"))
         if remaining:
             theme.out(f"remaining: {remaining}")
+    others = [
+        e
+        for e in list_guard_registry_entries()
+        if Path(str(e.get("vault_path") or "")).resolve() != ctx.vault_path.resolve()
+    ]
+    for entry in others:
+        theme.out(
+            f"other_guard: pid={entry.get('pid')} vault={entry.get('vault_path')}"
+        )
     return 0
 
 
-def cmd_passwd(_args: argparse.Namespace) -> int:
+def cmd_passwd(args: argparse.Namespace) -> int:
     """Change the master password: re-encrypts the vault with a fresh salt.
 
     Refuses outright while a guard session is alive (the guard holds the
@@ -895,11 +1096,13 @@ def cmd_passwd(_args: argparse.Namespace) -> int:
     """
     from key_amnesia.guard import guard_is_alive
 
-    if guard_is_alive():
+    ctx = _ctx_from_args(args)
+
+    if guard_is_alive(path=ctx.lock_path):
         theme.error("Lock the vault first: ka lock")
         return 1
 
-    vp = vault_path()
+    vp = ctx.vault_path
     if not vp.exists():
         theme.error("Vault not initialized. Run 'ka init' first.")
         return 1

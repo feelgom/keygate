@@ -12,6 +12,8 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.7 (bugfix, no CLI-surface / no IPC-verb changes):** fixed the guard's stale in-memory secrets snapshot (README limit 9 / "Known limitation" below). `GuardState` gained `vault_path`, `vault_key` (derived SecretBox key only — never the password), and `vault_content_fingerprint`; `run`/`list`/`status` now call `_maybe_reload_secrets`, which re-opens the vault with the retained key (no Argon2id) whenever the fingerprint changes. `cmd_unlock` switched from `load_vault` to `load_vault_with_key` to obtain that key without deriving it twice; `vault.py` gained `load_vault_with_key`, `load_vault_with_retained_key`, and `vault_fingerprint`. Verb set is unchanged — still exactly `{run, list, lock, status, renew}`; no `reload` verb was added (`tests/test_guard_verbs_regression.py` untouched). New exposure: the guard now retains **derived key material** for the session (see "Who holds plaintext" and the note under GuardState below) — same trust tier as the plaintext secrets it already held, but worth naming explicitly. `tests/test_guard_reload.py`.
 
+**0.3.10 (project vaults + guard registry; no IPC-verb changes):** walk-up discovery of `.amnesia/` from cwd (stops at home); per-env vault files under `.amnesia/envs/<name>/`; `.amnesia/config.json` `use_global` (default true) merges the global vault with project winning on name collision; CLI `--vault` / `--global` / `--no-global` / `--env`; `ka init --project [--env NAME]` scaffolds the tree and auto-gitignores `.amnesia/`; `ka import` / fresh-auth mutations target the resolved project vault when inside a project; `ka unlock` / `run` / `list` / `status` merge when configured (two independent password prompts when both vaults exist). Guard lock + `last_guard_state.json` sit beside the active vault; discovery-only registry at `~/.key-amnesia/guards/<hash>.json` (vault path, env, pid, expiry, address — **never** authkey). `GuardState.vault_sources` extends the 0.3.7 fingerprint reload so a merged unlock refreshes when *any* contributing vault file changes. Existing global vault: zero-action compatible. Verb set unchanged. `project.py`, `tests/test_project_vaults.py`.
+
 **0.3.9 (opens the `.env`-replacement line; no IPC-verb changes; no vault-format/resolution changes):** new `ka import FILE` command plus a shared, reusable core (`dotenv_import.py`) that a later `ka scan` (roadmap) can call into for its own offer-to-import path. `ka import` parses a dotenv-format file and merges its `NAME=value` pairs into the currently-resolved vault (still the single global vault — per-project vaults land in a later PR); it is **TTY-only**, like `init`/`passwd` (never routed through the spawned-console helper — it reads the local file itself rather than having a human type each value, and drives several interactive-only decisions below). Name collisions with an existing secret **default to skip** and only overwrite on an explicit confirm. After a successful import it asks (never silently) whether to delete the source file — a "yes" is double-confirmed before anything is removed — or, if delete was declined, offers to rename it to `<name>.imported`; separately it also offers (never silently, and skipped entirely if a covering pattern already exists) adding `.env*` to `.gitignore`. Finally it generates or merges a minimal `amnesia.toml` in the current directory (one `[[secret]]` table per imported name: `name`, `required = true`, `description = ""`, `env`) — this manifest is inert until a later PR adds `ka check` / `ka run` enforcement; merging only appends blocks for names not already present, matched on their `env` field. Never prints a secret value at any point. `tests/test_dotenv_import.py`, `tests/test_import_cmd.py`.
 **0.3.8 (admission model replaced; no IPC-verb changes; no new verb):** the admission-consent layer no longer trusts a message-supplied `caller_pid` or an opaque bearer token — it binds to the connecting process's **kernel-verified identity** instead (new `peer_identity.py`: `GetNamedPipeClientProcessId` + `OpenProcess`/`GetProcessTimes` on Windows, `SO_PEERCRED` + `/proc/<pid>/stat` on Linux; macOS/other fails closed). `admitted_session.token` is **gone** — there is no on-disk admission credential anymore; `guard_request` attaches nothing beyond an optional display-only `client_name`. Admission now also supports **secret-scoped grants** (a `run` naming a secret outside the admitted tree's current grant re-prompts to expand scope, rather than either a blanket allow or a blanket re-prompt-everything) and an opt-in, single-use, loud **`ka unlock --pre-admit [--pre-admit-secret NAME ...]`** (default window `pre-admit-seconds`, config default 900s / 15m) that auto-admits the very next unrecognized peer without a prompt — unscoped (ALL secrets) if no `--pre-admit-secret` is given. New `ka connect` is a plain CLI alias for `ka status` (same handler, no separate guard verb — still exactly `{run, list, lock, status, renew}`, `tests/test_guard_verbs_regression.py` untouched). New optional `--name LABEL` on every guard-talking command sets `KEY_AMNESIA_CLIENT_NAME` so the admission prompt can show a human-friendly label — display-only, never a trust input. See "Admission consent — kernel-verified peer identity" below for the full model, `peer_identity.py`, `test_guard_admission.py`, `test_guard_admission_legacy.py` (in-memory-only backward-compat path for callers that predate kernel identity), and `test_peer_identity_e2e.py` (real spawned-process security tests).
 **Out of scope:** macOS (and Safari); browser integration of any kind (removed, not deferred — see above); passkeys / TOTP; MCP wrapper; GUI; macOS isolated-console spawn (`Terminal.app` / `osascript`); DPAPI-protecting the names sidecar. Next iteration: Rust port of the same primitives (Argon2id, SecretBox AEAD, local IPC verbs).
@@ -35,6 +37,7 @@ key-amnesia/
     __main__.py
     cli.py                         # argparse; all subcommands + --help
     paths.py
+    project.py                     # .amnesia/ walk-up, VaultContext, merge helpers (since 0.3.10)
     config.py
     crypto.py                      # Argon2id + SecretBox (vault only)
     vault.py                       # binary layout + JSON payload; migrates obsolete fill keys
@@ -43,7 +46,7 @@ key-amnesia/
     audit.py                       # JSONL; never logs passwords
     ipc.py                         # Listener/Client + authkey only
     prompt_route.py                # isatty + CREATE_NEW_CONSOLE; env handoff
-    guard.py                       # foreground singleton; admission consent; death reporting
+    guard.py                       # foreground singleton; admission consent; death reporting; multi-source reload; discovery registry
     peer_identity.py               # kernel-verified peer (pid, start_time); no message-supplied pid trusted
     run_exec.py                    # buffer-then-scrub-then-relay
     clipboard.py
@@ -118,7 +121,26 @@ env = "OPENAI_API_KEY"
 
 `address` (named pipe), `authkey_hex`, `pid`, `expires_at`.
 
+Lives **beside the active vault** since 0.3.10 (`guard_lock_path_for_vault`): global unlock → `~/.key-amnesia/guard.lock`; project unlock → `.amnesia/guard.lock` (or `.amnesia/envs/<name>/guard.lock`). Same for `last_guard_state.json`.
+
 **No `session_key_hex`.** Authkey authentication alone defines the IPC trust boundary. An extra SecretBox layer over messages was dropped: with a session key co-stored in `guard.lock` next to the authkey, the same processes that can read the authkey can read the session key — zero added protection, pure complexity.
+
+### Project vaults (`.amnesia/`, since 0.3.10)
+
+```
+.amnesia/
+  config.json              # {"use_global": true, "default_env": optional}
+  vault.bin                # default env
+  vault.names.json
+  envs/<name>/vault.bin    # --env / KA_ENV / default_env
+  envs/<name>/vault.names.json
+```
+
+Walk-up from cwd for `.amnesia/`, stop at home. No project → global vault (zero-action compatible). Merge: project secrets overlay global when `use_global` and the global vault file exists; independent ciphertexts → **two password prompts** on unlock/run. Fresh-auth cmds (`set`/`remove`/`reveal`/`copy`) target a single resolved vault only. Policy note: `use_global: false` is CLI-level isolation for agents — not a cryptographic boundary.
+
+### Guard registry (`~/.key-amnesia/guards/<hash>.json`, since 0.3.10)
+
+Discovery only — vault path, env, pid, expiry, endpoint **address**. **Never authkey** (that stays only in the vault-adjacent lock). Written/removed by `run_foreground_guard` only when an explicit `vault_path` was passed (so tests that call it without a vault never touch real home). `ka status` globs + liveness-checks; stale entries dropped. Documented daily use: one `ka unlock` per project vault.
 
 ### No admission credential on disk (since 0.3.8)
 
