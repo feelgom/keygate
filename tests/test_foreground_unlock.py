@@ -36,9 +36,10 @@ def test_cmd_unlock_calls_foreground_guard_no_subprocess(
 
     calls: dict = {}
 
-    def fake_run_foreground_guard(payload, timeout_minutes):
+    def fake_run_foreground_guard(payload, timeout_minutes, **kwargs):
         calls["payload"] = payload
         calls["timeout_minutes"] = timeout_minutes
+        calls["kwargs"] = kwargs
         return 0
 
     monkeypatch.setattr(
@@ -49,6 +50,10 @@ def test_cmd_unlock_calls_foreground_guard_no_subprocess(
     assert rc == 0
     assert calls["payload"]["secrets"]["api_key"] == "super-secret-value-123"
     assert calls["timeout_minutes"] == 30
+    # PR0: cmd_unlock now threads the vault path + derived key (never the
+    # password) through so the guard can reload on a content change.
+    assert calls["kwargs"]["vault_path"] == seeded_vault
+    assert isinstance(calls["kwargs"]["vault_key"], bytes)
 
 
 def test_cmd_unlock_already_active_soft_warns(

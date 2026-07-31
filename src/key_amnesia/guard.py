@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from key_amnesia import ipc
 from key_amnesia import theme
+from key_amnesia import vault as vault_mod
 from key_amnesia.audit import audit_event
 from key_amnesia.paths import (
     admitted_session_token_path,
@@ -81,6 +82,17 @@ class GuardState:
     # guard shows (admission, extend) must share the same reader, or two
     # concurrent input() calls race for the same typed line.
     stdin_pump: "_StdinPump" = field(default_factory=lambda: _StdinPump())
+    # Stale-secrets reload support (see `_maybe_reload_secrets`). All three
+    # default to None so a `GuardState(...)` built without them (every
+    # existing test, and any future caller that genuinely has no on-disk
+    # vault behind it) simply never attempts a reload — never a required
+    # argument, never a behavior change for those callers.
+    vault_path: Path | None = None
+    # Derived SecretBox key only — NEVER the master password. Same trust
+    # tier as the plaintext secrets already held in `state.secrets`; see
+    # DESIGN.md "Derived key retained in guard memory".
+    vault_key: bytes | None = None
+    vault_content_fingerprint: str | None = None
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -382,12 +394,50 @@ def _check_admission(
     return True, new_token
 
 
+# --- stale-secrets reload ---------------------------------------------------
+
+
+def _maybe_reload_secrets(state: GuardState) -> None:
+    """Re-open the vault if its on-disk content changed since we last looked.
+
+    Fixes the guard's stale in-memory snapshot: `ka set` / `ka remove` from
+    another terminal write the vault file directly, but a long-running `ka
+    unlock` guard used to decrypt once at startup and never look again (see
+    README security limit 9 / DESIGN.md). Cheap content fingerprint first —
+    only re-opens the vault (SecretBox decrypt with the already-derived key,
+    no Argon2id, no password prompt) when that fingerprint actually moved.
+
+    No-ops when the state was built without vault_path/vault_key (every
+    guard-dispatch test constructs `GuardState` directly with just an
+    in-memory `secrets` dict and no backing vault file — those must keep
+    working unchanged).
+    """
+    if state.vault_path is None or state.vault_key is None:
+        return
+    current = vault_mod.vault_fingerprint(state.vault_path)
+    if current is None or current == state.vault_content_fingerprint:
+        return
+    try:
+        payload = vault_mod.load_vault_with_retained_key(state.vault_path, state.vault_key)
+    except vault_mod.VaultError:
+        # Torn read from a write-in-progress, or a corrupt file — keep
+        # serving the last-known-good snapshot rather than dropping every
+        # secret because of a transient read.
+        return
+    state.secrets = {k: str(v) for k, v in payload.get("secrets", {}).items()}
+    state.vault_content_fingerprint = current
+
+
 # --- verb dispatch ----------------------------------------------------------
 
 
 def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[str, Any]:
     if time.time() > state.expires_at and verb not in ("lock", "status"):
         return {"ok": False, "reason": "session expired", "expired": True}
+
+    # Only verbs that consult state.secrets need a freshness check.
+    if verb in ("run", "list", "status"):
+        _maybe_reload_secrets(state)
 
     if verb == "status":
         return {
@@ -719,7 +769,13 @@ def format_no_guard_message(path: Path | None = None) -> str:
     )
 
 
-def run_foreground_guard(payload: dict[str, Any], timeout_minutes: int) -> int:
+def run_foreground_guard(
+    payload: dict[str, Any],
+    timeout_minutes: int,
+    *,
+    vault_path: Path | str | None = None,
+    vault_key: bytes | None = None,
+) -> int:
     """`ka unlock`'s foreground body: build state, serve, block until done.
 
     Runs entirely in the caller's own terminal — no subprocess, no bootstrap
@@ -727,17 +783,30 @@ def run_foreground_guard(payload: dict[str, Any], timeout_minutes: int) -> int:
     and prints a status line, then blocks in guard_serve. On every exit path
     (locked / expired / interrupted / crashed) writes last_guard_state.json
     with an honest reason before clearing guard.lock.
+
+    `vault_path`/`vault_key` are optional: when the caller (cmd_unlock)
+    provides both, the guard retains the already-derived SecretBox key
+    (never the password) and re-opens the vault on a content change — see
+    `_maybe_reload_secrets`. Omitting them (as every existing test does)
+    keeps the old fixed-at-startup-only behavior.
     """
     secrets_map = {k: str(v) for k, v in payload.get("secrets", {}).items()}
     expires_at = time.time() + timeout_minutes * 60
     listener, address, authkey = ipc.start_listener()
     pid = os.getpid()
+    vp = Path(vault_path) if vault_path is not None else None
+    fingerprint = (
+        vault_mod.vault_fingerprint(vp) if vp is not None and vault_key is not None else None
+    )
     state = GuardState(
         secrets=secrets_map,
         expires_at=expires_at,
         address=address,
         authkey=authkey,
         pid=pid,
+        vault_path=vp,
+        vault_key=vault_key,
+        vault_content_fingerprint=fingerprint,
     )
     write_guard_lock(address, authkey, pid, expires_at)
     clear_admission_token()
