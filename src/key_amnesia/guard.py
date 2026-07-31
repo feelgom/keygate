@@ -62,11 +62,12 @@ EXTEND_PROMPT_WINDOW_S = 120.0
 # How often the guard nudges an idle terminal with time remaining.
 REMINDER_INTERVAL_S = 300.0
 
-# Sentinel default for `guard_handle_message`'s `peer` kwarg — distinguishes
-# "caller doesn't know about kernel peer identity at all" (pre-0.3.8 test
-# helpers; falls back to the legacy opaque-token comparison) from an
-# explicit `peer=None` ("a real lookup was attempted and failed"), which
-# always fails closed. See `_check_admission`.
+# Sentinel for `guard_handle_message_legacy` only — distinguishes "caller
+# doesn't know about kernel peer identity at all" (pre-0.3.8 test helpers;
+# falls back to the legacy opaque-token comparison) from an explicit
+# `peer=None` ("a real lookup was attempted and failed"), which always
+# fails closed. Module-private; not part of the public `guard_handle_message`
+# signature. See `_check_admission`.
 _PEER_UNSET = object()
 
 
@@ -92,12 +93,10 @@ class AdmittedSession:
     opt-in `--pre-admit` ALL-secrets case — see `run_foreground_guard`).
 
     `token` is a **legacy-only** field: it exists purely so
-    `guard_handle_message` keeps working, unmodified, for callers that
-    predate kernel peer identity and never pass a `peer` kwarg (several
-    pre-0.3.8 tests construct `AdmittedSession(token=..., ...)` directly).
-    `guard_serve` — the only production caller — always supplies a real
-    `peer`, so this field is never consulted on a live guard; see
-    `_check_admission_legacy`.
+    `guard_handle_message_legacy` keeps working for callers that predate
+    kernel peer identity. `guard_serve` — the only production caller —
+    always supplies a real `peer`, so this field is never consulted on a
+    live guard; see `_check_admission_legacy`.
     """
 
     identities: list[PeerIdentity] = field(default_factory=list)
@@ -495,13 +494,12 @@ def _check_admission(
     """Gate every verb behind kernel-verified process-tree identity.
 
     `peer` is the connection's kernel-verified `PeerIdentity` — see
-    `peer_identity.py` — never a message-supplied pid. The `_PEER_UNSET`
-    sentinel (the default when `guard_handle_message` is called without a
-    `peer` kwarg at all) routes to `_check_admission_legacy`, the pre-0.3.8
-    opaque-token check, kept only for callers that predate kernel identity;
-    `guard_serve` always supplies a real `peer`. An explicit `peer=None`
-    (a real lookup that failed) always fails closed — never treated as the
-    legacy case.
+    `peer_identity.py` — never a message-supplied pid. The module-private
+    `_PEER_UNSET` sentinel (only via `guard_handle_message_legacy`) routes
+    to `_check_admission_legacy`, the pre-0.3.8 opaque-token check, kept
+    only for tests that predate kernel identity; `guard_serve` always
+    supplies a real `peer`. An explicit `peer=None` (a real lookup that
+    failed) always fails closed — never treated as the legacy case.
 
     Returns `(admitted, new_token_or_None)` — the token is always `None` on
     this path (nothing is minted or handed back; see `_check_admission_legacy`
@@ -595,11 +593,10 @@ def _check_admission_legacy(
 ) -> tuple[bool, str | None]:
     """Pre-0.3.8 opaque-token admission.
 
-    Kept **only** so `guard_handle_message` stays callable exactly as
-    before by tests/call sites that predate kernel peer identity and never
-    pass a `peer` kwarg. `guard_serve` — the only production dispatch
-    path — always supplies a real `peer`, so this function never runs
-    against a live guard. It is the same in-memory equality check that
+    Kept **only** so `guard_handle_message_legacy` can exercise the
+    pre-kernel-identity path in tests. `guard_serve` — the only production
+    dispatch path — always supplies a real `peer`, so this function never
+    runs against a live guard. It is the same in-memory equality check that
     existed pre-0.3.8; the vulnerable *on-disk* bearer file
     (`admitted_session.token`) it used to pair with is gone (see
     `guard_request`) — nothing here is reachable from outside this process.
@@ -909,7 +906,7 @@ def guard_handle_message(
     msg: dict[str, Any],
     state: GuardState,
     *,
-    peer: Any = _PEER_UNSET,
+    peer: Any,
     admit_prompt: AdmitPromptFn | None = None,
 ) -> dict[str, Any]:
     """Handle one guard IPC message. Never returns raw secret values.
@@ -917,8 +914,9 @@ def guard_handle_message(
     Authkey check happens at the IPC layer (Listener/Client) before this
     function ever sees the message. On top of that, every verb is gated by
     admission consent bound to kernel-verified process-tree identity — see
-    `_check_admission` for the full model (including the `_PEER_UNSET`
-    default's legacy fallback, kept for pre-0.3.8 callers).
+    `_check_admission` for the full model. `peer` is required (keyword-only);
+    pass a real `PeerIdentity` or `None` (fail closed). Legacy opaque-token
+    dispatch is only via `guard_handle_message_legacy` (tests only).
     """
     if not isinstance(msg, dict):
         return {"ok": False, "reason": "invalid message"}
@@ -934,6 +932,16 @@ def guard_handle_message(
     if new_token:
         reply["admission_token"] = new_token
     return reply
+
+
+def guard_handle_message_legacy(
+    msg: dict[str, Any],
+    state: GuardState,
+    *,
+    admit_prompt: AdmitPromptFn | None = None,
+) -> dict[str, Any]:
+    """Pre-0.3.8 opaque-token dispatch — tests only, never a live guard."""
+    return guard_handle_message(msg, state, peer=_PEER_UNSET, admit_prompt=admit_prompt)
 
 
 # --- serve loop + honest death reporting -----------------------------------

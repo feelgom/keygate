@@ -25,6 +25,7 @@ from key_amnesia.guard import (
     write_guard_registry_entry,
 )
 from key_amnesia.paths import guard_lock_path_for_vault, guards_registry_dir
+from key_amnesia.peer_identity import PeerIdentity
 from key_amnesia.project import (
     ensure_project_scaffold,
     find_project_root,
@@ -35,7 +36,7 @@ from key_amnesia.project import (
 )
 
 
-ADMITTED_TOKEN = "test-admitted-token"
+PEER = PeerIdentity(pid=4242, start_time=1000)
 
 
 def _make_project(tmp_path: Path, *, use_global: bool = True) -> Path:
@@ -214,12 +215,13 @@ def test_guard_reload_covers_all_merged_sources(
         vault_key=p_key,
     )
     state.admitted = AdmittedSession(
-        token=ADMITTED_TOKEN, first_seen="2026-01-01T00:00:00+00:00"
+        identities=[PEER],
+        first_seen="2026-01-01T00:00:00+00:00",
+        unscoped=True,
+        granted_until=state.expires_at,
     )
 
-    reply = guard_handle_message(
-        {"verb": "list", "admission_token": ADMITTED_TOKEN}, state
-    )
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
     assert reply["ok"] is True
     assert set(reply["names"]) == {"G", "P", "SHARED"}
 
@@ -229,9 +231,7 @@ def test_guard_reload_covers_all_merged_sources(
         password,
         {"secrets": {"G": "gv2", "SHARED": "g", "G_NEW": "x"}},
     )
-    reply = guard_handle_message(
-        {"verb": "list", "admission_token": ADMITTED_TOKEN}, state
-    )
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
     assert reply["ok"] is True
     assert "G_NEW" in reply["names"]
     # Project still wins on SHARED

@@ -28,6 +28,8 @@ from key_amnesia import ipc
 from key_amnesia.guard import GuardState, guard_handle_message
 from key_amnesia.peer_identity import get_ancestor_chain, is_in_admitted_tree
 
+pytestmark = pytest.mark.slow
+
 SLEEP_SCRIPT = "import time; time.sleep(30)"
 
 

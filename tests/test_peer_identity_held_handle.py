@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from key_amnesia.peer_identity import PeerIdentity, get_ancestor_chain
+from key_amnesia.peer_identity import MAX_ANCESTOR_DEPTH, PeerIdentity, get_ancestor_chain
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="OpenProcess hold is Windows-only")
@@ -52,6 +52,30 @@ def test_ancestor_chain_does_not_hold_handles() -> None:
     chain = get_ancestor_chain(os.getpid(), max_depth=3)
     assert chain
     assert all(node.process_handle is None for node in chain)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="CreateToolhelp32Snapshot is Windows-only")
+def test_ancestor_chain_takes_one_process_snapshot(monkeypatch) -> None:
+    """get_ancestor_chain must CreateToolhelp32Snapshot exactly once, any depth."""
+    import ctypes
+
+    real_snap = ctypes.windll.kernel32.CreateToolhelp32Snapshot
+    calls = {"n": 0}
+
+    def counting_snap(*args, **kwargs):
+        calls["n"] += 1
+        return real_snap(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ctypes.windll.kernel32, "CreateToolhelp32Snapshot", counting_snap
+    )
+    chain = get_ancestor_chain(os.getpid(), max_depth=MAX_ANCESTOR_DEPTH)
+    assert chain
+    assert calls["n"] == 1
+    # A second walk still snapshots once (not once per hop / prior call).
+    calls["n"] = 0
+    get_ancestor_chain(os.getpid(), max_depth=1)
+    assert calls["n"] == 1
 
 
 @pytest.mark.skip(
