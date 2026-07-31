@@ -13,6 +13,7 @@ from typing import Any
 
 from key_amnesia import __version__
 from key_amnesia import crypto
+from key_amnesia import dotenv_import
 from key_amnesia.audit import audit_event
 from key_amnesia.config import ConfigError, load_config, set_config_value
 from key_amnesia.paths import vault_path
@@ -76,6 +77,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # remove
     p_rm = sub.add_parser("remove", help="Remove a secret (always fresh auth)")
     p_rm.add_argument("name", help="Secret name")
+
+    # import
+    p_import = sub.add_parser(
+        "import",
+        help="Import secrets from a dotenv file into the vault (TTY-only)",
+    )
+    p_import.add_argument("file", help="Path to a dotenv-format file, e.g. .env")
 
     # run
     p_run = sub.add_parser(
@@ -238,6 +246,20 @@ def _prompt_new_master_password() -> str | None:
     return p1
 
 
+def _confirm(prompt: str, *, default: bool = False) -> bool:
+    """Interactive yes/no prompt. Blank/EOF falls back to `default` rather
+    than raising — but a default is always explicit in the prompt's own
+    `[Y/n]` / `[y/N]` suffix, never a silently-assumed answer."""
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    try:
+        answer = input(prompt + suffix).strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
 def cmd_init(_args: argparse.Namespace) -> int:
     vp = vault_path()
     if vp.exists():
@@ -378,6 +400,109 @@ def cmd_remove(args: argparse.Namespace) -> int:
         return 0
     theme.error(f"Denied: {outcome.reason or 'remove failed'}")
     return 1
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """`ka import FILE`: parse a dotenv file and merge its entries into the
+    currently resolved vault.
+
+    TTY-only, like `ka init` / `ka passwd` — this command reads a local
+    plaintext file directly (never an agent-supplied value) and drives
+    several interactive decisions (collisions, delete/rename, .gitignore)
+    that only make sense with a human at the keyboard, so it is never
+    routed through the spawned-console agent-safe helper. Never prints a
+    secret value at any point.
+    """
+    if not sys.stdin.isatty():
+        theme.error(
+            "Error: ka import requires an interactive terminal "
+            "(run it directly in your console)."
+        )
+        return 1
+
+    src = Path(args.file)
+    if not src.exists():
+        theme.error(f"Error: file not found: {src}")
+        return 1
+
+    vp = vault_path()
+    if not vp.exists():
+        theme.error("Vault not initialized. Run 'ka init' first.")
+        return 1
+
+    entries = dotenv_import.parse_dotenv(src)
+    if not entries:
+        theme.info(f"No KEY=VALUE entries found in {src}.")
+        return 0
+
+    password = getpass.getpass("Master password: ")
+    try:
+        payload = load_vault(vp, password)
+    except VaultError as e:
+        theme.error(f"Error: {e}")
+        audit_event("import", route="inline", result="denied", reason=str(e))
+        return 1
+
+    def _ask_collision(name: str) -> str:
+        overwrite = _confirm(f"'{name}' already exists in the vault. Overwrite?")
+        return "overwrite" if overwrite else "skip"
+
+    imported, skipped = dotenv_import.import_entries(
+        entries, payload["secrets"], on_collision=_ask_collision
+    )
+
+    if imported:
+        save_vault(vp, password, payload)
+    audit_event(
+        "import",
+        secret_names=imported,
+        route="inline",
+        result="allowed" if imported else "denied",
+        reason="" if imported else "no new secrets (all skipped)",
+    )
+
+    if imported:
+        theme.success(f"Imported {len(imported)} secret(s): {', '.join(imported)}")
+    if skipped:
+        theme.info(f"Skipped (already in vault): {', '.join(skipped)}")
+    if not imported and not skipped:
+        theme.info("Nothing to import.")
+
+    if not imported:
+        return 0
+
+    outcome = dotenv_import.delete_or_rename_source(
+        src,
+        confirm_delete=lambda: _confirm(
+            f"Delete {src} now that its secrets are in the vault?"
+        ),
+        confirm_delete_again=lambda: _confirm(
+            f"This cannot be undone. Really delete {src}?"
+        ),
+        confirm_rename=lambda: _confirm(
+            f"Rename {src} to {src.name}.imported instead?", default=True
+        ),
+    )
+    if outcome == "deleted":
+        theme.success(f"Deleted {src}.")
+    elif outcome == "renamed":
+        theme.success(f"Renamed {src} to {src.name}.imported.")
+    else:
+        theme.info(f"Left {src} in place.")
+
+    added_gitignore = dotenv_import.offer_gitignore(
+        Path.cwd(),
+        ask=lambda: _confirm(
+            "Add '.env*' to .gitignore so these files are never committed?"
+        ),
+    )
+    if added_gitignore:
+        theme.success("Added '.env*' to .gitignore.")
+
+    manifest_path = dotenv_import.generate_or_merge_manifest(imported, Path.cwd())
+    theme.info(f"Manifest updated: {manifest_path}")
+
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -825,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
         "change-password": cmd_passwd,
         "set": cmd_set,
         "remove": cmd_remove,
+        "import": cmd_import,
         "run": cmd_run,
         "list": cmd_list,
         "unlock": cmd_unlock,
