@@ -22,30 +22,13 @@ from key_amnesia.guard import (
 )
 
 
-def _best_effort_lock_guard() -> None:
-    """Stop a leftover foreground guard so it cannot poison later tests."""
-    try:
-        if not guard_lock_path().exists():
-            return
-        lock = json.loads(guard_lock_path().read_text(encoding="utf-8"))
-        authkey = ipc.authkey_from_hex(lock["authkey_hex"])
-        conn = ipc.connect(lock["address"], authkey)
-        try:
-            ipc.send_msg(conn, {"verb": "lock", "caller_pid": 0})
-            ipc.recv_msg(conn, timeout=2)
-        finally:
-            conn.close()
-    except Exception:
-        pass
-
-
 def test_no_previous_session_message(ka_home) -> None:
     assert format_no_guard_message() == (
         "Guard is not running. No previous session recorded."
     )
 
 
-def test_guard_serve_returns_locked_reason(ka_home, monkeypatch, stub_peer_identity) -> None:
+def test_guard_serve_returns_locked_reason(ka_home, monkeypatch) -> None:
     monkeypatch.setattr("key_amnesia.guard.default_admit_prompt", lambda *a, **k: True)
     listener, address, authkey = ipc.start_listener()
     state = GuardState(
@@ -85,7 +68,7 @@ def test_guard_serve_returns_expired_reason(ka_home) -> None:
 
 
 def test_run_foreground_guard_writes_last_state_on_lock(
-    ka_home, monkeypatch, capsys, stub_peer_identity
+    ka_home, monkeypatch, capsys
 ) -> None:
     """A client `lock` request during run_foreground_guard writes reason=locked
     to last_guard_state.json before guard.lock is cleared, and the guard
@@ -99,45 +82,42 @@ def test_run_foreground_guard_writes_last_state_on_lock(
 
     t = threading.Thread(target=unlock_thread, daemon=True)
     t.start()
+
+    # Wait for guard.lock to appear.
+    deadline = time.time() + 5
+    lock = None
+    while time.time() < deadline:
+        if guard_lock_path().exists():
+            try:
+                candidate = json.loads(guard_lock_path().read_text(encoding="utf-8"))
+                if candidate:
+                    lock = candidate
+                    break
+            except Exception:
+                pass
+        time.sleep(0.05)
+    assert lock is not None
+
+    authkey = ipc.authkey_from_hex(lock["authkey_hex"])
+    conn = ipc.connect(lock["address"], authkey)
     try:
-        # Wait for guard.lock to appear.
-        deadline = time.time() + 5
-        lock = None
-        while time.time() < deadline:
-            if guard_lock_path().exists():
-                try:
-                    candidate = json.loads(guard_lock_path().read_text(encoding="utf-8"))
-                    if candidate:
-                        lock = candidate
-                        break
-                except Exception:
-                    pass
-            time.sleep(0.05)
-        assert lock is not None
-
-        authkey = ipc.authkey_from_hex(lock["authkey_hex"])
-        conn = ipc.connect(lock["address"], authkey)
-        try:
-            ipc.send_msg(conn, {"verb": "lock", "caller_pid": 12345})
-            reply = ipc.recv_msg(conn, timeout=10)
-        finally:
-            conn.close()
-        assert reply.get("ok") is True
-
-        t.join(timeout=5)
-        assert result.get("rc") == 0
-        assert not guard_lock_path().exists()
-
-        last = read_last_guard_state()
-        assert last is not None
-        assert last["reason"] == "locked"
-
-        out = capsys.readouterr().out
-        assert "Guard listening" in out
-        assert "Waiting for requests" in out
+        ipc.send_msg(conn, {"verb": "lock", "caller_pid": 12345})
+        reply = ipc.recv_msg(conn, timeout=10)
     finally:
-        _best_effort_lock_guard()
-        t.join(timeout=5)
+        conn.close()
+    assert reply.get("ok") is True
+
+    t.join(timeout=5)
+    assert result.get("rc") == 0
+    assert not guard_lock_path().exists()
+
+    last = read_last_guard_state()
+    assert last is not None
+    assert last["reason"] == "locked"
+
+    out = capsys.readouterr().out
+    assert "Guard listening" in out
+    assert "Waiting for requests" in out
 
 
 def test_run_foreground_guard_reports_interrupted(ka_home, monkeypatch, capsys) -> None:

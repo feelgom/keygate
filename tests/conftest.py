@@ -7,28 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from key_amnesia.peer_identity import PeerIdentity
-
-
-@pytest.fixture
-def stub_peer_identity(monkeypatch: pytest.MonkeyPatch) -> PeerIdentity:
-    """Stand-in kernel peer for tests that exercise real IPC admission.
-
-    Product `get_peer_identity` returns `None` on macOS (fail closed). Tests
-    that need a successful admit/lock/run path over a live listener request
-    this fixture so the lookup returns a stable identity for this process —
-    product code stays fail-closed on unsupported platforms.
-    """
-    peer = PeerIdentity(pid=os.getpid(), start_time=1)
-
-    def _fake_get_peer_identity(_conn=None) -> PeerIdentity:
-        return PeerIdentity(pid=os.getpid(), start_time=1)
-
-    monkeypatch.setattr(
-        "key_amnesia.peer_identity.get_peer_identity", _fake_get_peer_identity
-    )
-    return peer
-
 
 @pytest.fixture
 def ka_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
