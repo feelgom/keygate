@@ -1,9 +1,10 @@
 """`ka setup`: non-interactive install of packaged skills + secret-guard hook.
 
-Copies the three bundled agent skills to the Claude Code / Cursor skills
-directories and merges a `PreToolUse` (Claude) / `preToolUse` (Cursor) hook
-entry into each host's own config file. Safe to re-run (idempotent upsert);
-never drops unrelated keys or other hooks/matchers already present.
+Copies the three bundled agent skills to the Claude Code / Cursor / Codex
+skills directories and merges a `PreToolUse` (Claude, Codex) / `preToolUse`
+(Cursor) hook entry into each host's own config file. Safe to re-run
+(idempotent upsert); never drops unrelated keys or other hooks/matchers
+already present.
 """
 
 from __future__ import annotations
@@ -22,12 +23,23 @@ SKILL_NAMES = ["key-amnesia-usage", "key-amnesia-hygiene", "key-amnesia-migrate"
 
 CLAUDE_MATCHER = "Bash|Write|Edit"
 CURSOR_MATCHER = "Shell|Write"
+# Codex: Bash + apply_patch aliases (Write/Edit also match apply_patch edits).
+CODEX_MATCHER = "Bash|Write|Edit|apply_patch"
 HOOK_COMMAND = "key-amnesia-hook"
 HOOK_COMMAND_FALLBACK = "python -m key_amnesia.hooks.secret_guard"
 
 
 def _skills_root():
     return resources.files("key_amnesia") / "skills"
+
+
+def _codex_home(home: Path | None = None) -> Path:
+    """Resolve Codex home: ``$CODEX_HOME`` if set, else ``~/.codex``."""
+    home = home or Path.home()
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env)
+    return home / ".codex"
 
 
 def _copy_skills(dest_roots: list[Path]) -> list[str]:
@@ -69,7 +81,8 @@ def _is_our_hook_command(command: str) -> bool:
     return "key-amnesia-hook" in command or "key_amnesia.hooks.secret_guard" in command
 
 
-def _merge_claude_settings(path: Path) -> None:
+def _merge_pretooluse_hooks(path: Path, matcher: str) -> None:
+    """Idempotently upsert our PreToolUse entry (Claude / Codex shape)."""
     settings = _load_json_object(path)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -91,12 +104,20 @@ def _merge_claude_settings(path: Path) -> None:
     kept = [e for e in pretooluse if not _is_ours(e)]
     kept.append(
         {
-            "matcher": CLAUDE_MATCHER,
+            "matcher": matcher,
             "hooks": [{"type": "command", "command": _hook_command()}],
         }
     )
     hooks["PreToolUse"] = kept
     _write_json(path, settings)
+
+
+def _merge_claude_settings(path: Path) -> None:
+    _merge_pretooluse_hooks(path, CLAUDE_MATCHER)
+
+
+def _merge_codex_hooks(path: Path) -> None:
+    _merge_pretooluse_hooks(path, CODEX_MATCHER)
 
 
 def _merge_cursor_hooks(path: Path) -> None:
@@ -150,19 +171,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return 2
 
     home = Path.home()
+    codex_home = _codex_home(home)
     lines: list[str] = []
 
     if not hook_only:
-        dest_roots = [home / ".claude" / "skills", home / ".cursor" / "skills"]
+        dest_roots = [
+            home / ".claude" / "skills",
+            home / ".cursor" / "skills",
+            home / ".agents" / "skills",
+            codex_home / "skills",
+        ]
         lines.extend(_copy_skills(dest_roots))
 
     if not skills_only:
         claude_settings = home / ".claude" / "settings.json"
         cursor_hooks = home / ".cursor" / "hooks.json"
+        codex_hooks = codex_home / "hooks.json"
         _merge_claude_settings(claude_settings)
         lines.append(f"hook installed: {claude_settings} (PreToolUse)")
         _merge_cursor_hooks(cursor_hooks)
         lines.append(f"hook installed: {cursor_hooks} (preToolUse)")
+        _merge_codex_hooks(codex_hooks)
+        lines.append(f"hook installed: {codex_hooks} (PreToolUse)")
 
     lines.append(_check_path())
 
@@ -170,8 +200,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         theme.out(line)
 
     theme.info(
-        "Restart Claude Code / Cursor (or reload the window) to pick up the "
-        "new skills and hook."
+        "Restart Claude Code / Cursor / Codex (or reload the window) to pick "
+        "up the new skills and hook."
+    )
+    theme.info(
+        "Codex: review and trust the new hook via `/hooks` before it will run."
     )
     theme.info(
         "In your own terminal: `ka init` (first time) or `ka unlock` (start a session)."

@@ -32,7 +32,7 @@ The agent gets amnesia. That's the whole point.
 
 ```bash
 pip install key-amnesia
-ka setup                          # skills + secret-guard hook for Claude Code / Cursor
+ka setup                          # skills + secret-guard hook for Claude Code / Cursor / Codex
 ka init --project                 # or: ka init  for a global vault
 ka import .env                    # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
@@ -70,7 +70,11 @@ this project:
    you cannot do that step yourself.
 ```
 
-`ka setup` copies the bundled skills to `~/.claude/skills/` and `~/.cursor/skills/`, and merges a PreToolUse / preToolUse hook that blocks tool calls containing inline credential-shaped tokens.
+`ka setup` copies the bundled skills to `~/.claude/skills/`, `~/.cursor/skills/`,
+`~/.agents/skills/` (Codex), and `~/.codex/skills/` (legacy Codex /
+`$CODEX_HOME`), and merges a PreToolUse / preToolUse hook that blocks tool
+calls containing inline credential-shaped tokens. Codex also needs you to
+review and trust the new hook via `/hooks` before it will run.
 
 ## Two modes: ask every time, or unlock a session
 

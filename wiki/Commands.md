@@ -19,7 +19,7 @@ notes live in the repository `DESIGN.md`.
 | `ka reveal NAME` / `ka copy NAME` | Human-only surface of a value; always fresh auth |
 | `ka config show` / `ka config set KEY VALUE` | Settings |
 | `ka status` / `ka connect` | Session status (+ registry of live guards). `connect` is a **CLI alias** for `status` — not a sixth IPC verb |
-| `ka setup [--skills-only] [--hook-only]` | Install skills + secret-guard hook |
+| `ka setup [--skills-only] [--hook-only]` | Install skills + secret-guard hook (Claude / Cursor / Codex) |
 | `ka docs [--print]` | Print wiki URL; open browser unless `--print` |
 | `ka identity create` / `show` | Local X25519 identity for KAM2 |
 | `ka member add` / `list` / `remove` | Members/roles (first add enables KAM2) |

@@ -12,6 +12,8 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.7 (bugfix, no CLI-surface / no IPC-verb changes):** fixed the guard's stale in-memory secrets snapshot (README limit 11 / "Known limitation" below). `GuardState` gained `vault_path`, `vault_key` (derived SecretBox key only — never the password), and `vault_content_fingerprint`; `run`/`list`/`status` now call `_maybe_reload_secrets`, which re-opens the vault with the retained key (no Argon2id) whenever the fingerprint changes. `cmd_unlock` switched from `load_vault` to `load_vault_with_key` to obtain that key without deriving it twice; `vault.py` gained `load_vault_with_key`, `load_vault_with_retained_key`, and `vault_fingerprint`. Verb set is unchanged — still exactly `{run, list, lock, status, renew}`; no `reload` verb was added (`tests/test_guard_verbs_regression.py` untouched). New exposure: the guard now retains **derived key material** for the session (see "Who holds plaintext" and the note under GuardState below) — same trust tier as the plaintext secrets it already held, but worth naming explicitly. `tests/test_guard_reload.py`.
 
+**0.4.3 (Codex support; no IPC-verb changes):** `ka setup` also installs the three packaged skills into `~/.agents/skills/` and `~/.codex/skills/` (`$CODEX_HOME`), and merges a Codex `PreToolUse` hook into `~/.codex/hooks.json` (matcher `Bash|Write|Edit|apply_patch`). Secret-guard allows `apply_patch`. Docs/README/wiki note Codex restart + `/hooks` trust. Version `0.4.3`.
+
 **0.4.2 (review hardening; no IPC-verb changes):** `migrate_kam1_to_kam2` requires `confirm=` unconditionally (announce alone can no longer migrate). Windows ancestor walk takes one `CreateToolhelp32Snapshot` per chain. `guard_handle_message` requires keyword-only `peer=` (no default); legacy opaque-token path is `guard_handle_message_legacy` (tests only). Five-verb regression covers both legacy and kernel admission. Linux `SO_PEERCRED` compares kernel uid to `os.geteuid()` and fails closed on mismatch. Optional `@pytest.mark.slow` for process-spawning tests. Version `0.4.2`.
 
 **0.4.1 (admission follow-up; no IPC-verb changes):** Windows connecting-peer `OpenProcess` HANDLE is held on `PeerIdentity` for the admission lifetime (ancestor walks still open-read-close); `release()` on replace + foreground-guard teardown. README honesty on Windows vs Linux `SO_PEERCRED`, ancestry UX vs in-tree malware, and the residual GetNamedPipeClientProcessId→OpenProcess race. Legacy IPC display field renamed `caller_pid` → `claimed_pid_unverified`. Usage skill: verify with `ka status`/`ka connect` before assuming vault access. Version `0.4.1`.
@@ -70,7 +72,7 @@ key-amnesia/
     clipboard.py
     theme.py                       # branded CLI output (NO_COLOR / non-TTY safe)
     platform.py                    # isolated-console spawn (Windows CREATE_NEW_CONSOLE; Linux emulators + /dev/tty install offer; experimental macOS Terminal + PID-file wrapper)
-    setup_cmd.py                   # `ka setup`: installs skills + merges hook config into ~/.claude, ~/.cursor
+    setup_cmd.py                   # `ka setup`: installs skills + merges hook config into ~/.claude, ~/.cursor, ~/.agents, ~/.codex
     skills/                        # packaged agent skills (key-amnesia-usage / -hygiene / -migrate), package data
     hooks/
       secret_guard.py              # PreToolUse (Claude) / preToolUse (Cursor) blocking hook; console script key-amnesia-hook
@@ -517,7 +519,7 @@ Always fresh master-password routing (never guard shortcut) for `reveal`, `copy`
 - `config set session-mode|session-timeout-minutes|prompt-timeout-seconds|pre-admit-seconds` — always fresh auth
 - `status` (alias `connect`, same handler, no separate guard verb) — live guard status (pid, expiry, secret count, admission state, pre-admit-pending state) or the last session's honest death report
 - `run`/`list`/`lock`/`status`/`connect` accept `--name LABEL` — display-only client label shown in the guard's admission prompt (see "Admission consent" above); never a trust input
-- `setup` — non-interactive: copies the 3 packaged skills to `~/.claude/skills/` + `~/.cursor/skills/` and idempotently merges the secret-guard hook into `~/.claude/settings.json` (`PreToolUse`) + `~/.cursor/hooks.json` (`preToolUse`); `--skills-only` / `--hook-only` to do just one half; never mutates vault/session state
+- `setup` — non-interactive: copies the 3 packaged skills to `~/.claude/skills/` + `~/.cursor/skills/` + `~/.agents/skills/` + `~/.codex/skills/` (`$CODEX_HOME`) and idempotently merges the secret-guard hook into `~/.claude/settings.json` (`PreToolUse`) + `~/.cursor/hooks.json` (`preToolUse`) + `~/.codex/hooks.json` (`PreToolUse`, matcher includes `apply_patch`); `--skills-only` / `--hook-only` to do just one half; never mutates vault/session state
 - `docs [--print]` — print the GitHub wiki URL always; best-effort browser open (skipped with `--print`); never fails if open fails; no vault/guard/password; per-command `--docs` deferred
 - `_prompt-helper` — internal; bare argv + env handoff; omitted from top-level summary, still supports `--help`
 

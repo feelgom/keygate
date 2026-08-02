@@ -23,9 +23,15 @@ ka setup
 ```
 
 Copies bundled skills (`key-amnesia-usage`, `key-amnesia-hygiene`,
-`key-amnesia-migrate`) into `~/.claude/skills/` and `~/.cursor/skills/`, and
-merges a PreToolUse / preToolUse hook that blocks tool calls containing
-inline credential-shaped tokens. Restart or reload the host afterward.
+`key-amnesia-migrate`) into `~/.claude/skills/`, `~/.cursor/skills/`,
+`~/.agents/skills/` (current Codex user path), and `~/.codex/skills/`
+(legacy / `$CODEX_HOME`), and merges a PreToolUse / preToolUse hook that
+blocks tool calls containing inline credential-shaped tokens. Restart or
+reload the host afterward. On Codex, review and trust the new hook via
+`/hooks` before it will run.
+
+Codex also reads project `AGENTS.md` for instructions; that is separate from
+skills installed by `ka setup`.
 
 Flags: `--skills-only`, `--hook-only`.
 
