@@ -103,11 +103,16 @@ def test_guard_run_path_scrubs(seeded_vault: Path, password: str) -> None:
 
 
 def test_unlock_run_lock_fallback(
-    seeded_vault: Path, password: str, monkeypatch, capsys
+    seeded_vault: Path, password: str, monkeypatch, capsys, stub_peer_identity
 ) -> None:
     """Simulate unlock→run via guard→lock→fallback to per-call."""
     from key_amnesia import guard as guard_mod
     from key_amnesia import ipc
+    from key_amnesia import peer_identity
+
+    # stub_peer_identity: macOS (and other unsupported platforms) fail closed
+    # in product get_peer_identity; the fixture supplies a stable current-
+    # process identity so this in-process client/server exercise can admit.
 
     payload = load_vault(seeded_vault, password)
     secrets = {k: str(v) for k, v in payload["secrets"].items()}
@@ -133,8 +138,6 @@ def test_unlock_run_lock_fallback(
 
     import threading
 
-    from key_amnesia import peer_identity
-
     stop = threading.Event()
 
     def serve_one() -> None:
@@ -157,58 +160,61 @@ def test_unlock_run_lock_fallback(
 
     t = threading.Thread(target=serve_one, daemon=True)
     t.start()
-
-    code = "import os; print(os.environ['API_KEY'])"
-    rc = main(
-        [
-            "run",
-            "--secret",
-            "api_key",
-            "--as",
-            "api_key=API_KEY",
-            "--",
-            sys.executable,
-            "-c",
-            code,
-        ]
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "***REDACTED(api_key)***" in out
-    assert "super-secret-value-123" not in out
-
-    # Lock
-    rc = main(["lock"])
-    assert rc == 0
-    stop.set()
-    clear_guard_lock()
-    monkeypatch.setattr(guard_mod, "guard_is_alive", lambda *a, **k: False)
-
-    # Fallback: per-call with password
-    monkeypatch.setattr(
-        "key_amnesia.cli.require_human_auth",
-        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
-    )
-    rc = main(
-        [
-            "run",
-            "--secret",
-            "api_key",
-            "--as",
-            "api_key=API_KEY",
-            "--",
-            sys.executable,
-            "-c",
-            code,
-        ]
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "***REDACTED(api_key)***" in out
     try:
-        listener.close()
-    except Exception:
-        pass
+        code = "import os; print(os.environ['API_KEY'])"
+        rc = main(
+            [
+                "run",
+                "--secret",
+                "api_key",
+                "--as",
+                "api_key=API_KEY",
+                "--",
+                sys.executable,
+                "-c",
+                code,
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "***REDACTED(api_key)***" in out
+        assert "super-secret-value-123" not in out
+
+        # Lock
+        rc = main(["lock"])
+        assert rc == 0
+        stop.set()
+        clear_guard_lock()
+        monkeypatch.setattr(guard_mod, "guard_is_alive", lambda *a, **k: False)
+
+        # Fallback: per-call with password
+        monkeypatch.setattr(
+            "key_amnesia.cli.require_human_auth",
+            lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+        )
+        rc = main(
+            [
+                "run",
+                "--secret",
+                "api_key",
+                "--as",
+                "api_key=API_KEY",
+                "--",
+                sys.executable,
+                "-c",
+                code,
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "***REDACTED(api_key)***" in out
+    finally:
+        stop.set()
+        try:
+            listener.close()
+        except Exception:
+            pass
+        t.join(timeout=5)
 
 
 def test_reveal_noninteractive_status_only(monkeypatch, capsys) -> None:
