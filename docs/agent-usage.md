@@ -16,8 +16,10 @@ There is no MCP “get secret” API. That is intentional.
 2. Run tools through injection:
 
    ```bash
-   ka run --secret OPENAI_API_KEY --as OPENAI_API_KEY -- python my_script.py
+   ka run --secret OPENAI_API_KEY -- python my_script.py
    ```
+
+   Remap with `--as NAME=ENVVAR` (vault name on the left). Wrong: `--as OPENAI_API_KEY` without `=`.
 
 3. Use scrubbed stdout/stderr and the exit code. Do not try to recover the original secret from output.
 
@@ -47,4 +49,5 @@ There is no MCP “get secret” API. That is intentional.
 
 Agent-oriented short form: the `key-amnesia-usage` skill (`src/key_amnesia/skills/key-amnesia-usage/SKILL.md`), installed for Claude Code / Cursor via `ka setup`.
 
-Human docs: [GitHub wiki](https://github.com/fujitoid/key-amnesia/wiki) (`ka docs`).
+Human docs: [GitHub wiki — Agent usage](https://github.com/fujitoid/key-amnesia/wiki/Agent-usage)
+(`ka docs`).

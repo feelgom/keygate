@@ -1,8 +1,9 @@
 # macOS
 
-**Experimental** (0.4.0). Neither the maintainer nor the usual reviewers own a
-Mac; treat the visible Terminal.app window path as unconfirmed until a real
-Mac user reports success.
+**Experimental** (0.4.0). Do **not** treat macOS as fully supported for
+daily use. Neither the maintainer nor the usual reviewers own a Mac; treat
+the visible Terminal.app window path as unconfirmed until a real Mac user
+reports success.
 
 ## What works in CI
 
@@ -22,7 +23,9 @@ still **fail closed** when the helper never records a PID.
 ## What is still fail-closed
 
 - Other platforms (FreeBSD, etc.)
-- Kernel peer-identity admission on macOS (guard admission still fails closed
-  without a verified peer — see [Guard and admission](Guard-and-admission))
+- **Kernel peer-identity admission on macOS** — unsupported today; when
+  peer lookup returns `None`, guard admission **fails closed** (no
+  unrecognized-peer fallback, no bearer-token revival). See
+  [Guard and admission](Guard-and-admission).
 
 Windows and Linux remain the supported platforms for daily use.

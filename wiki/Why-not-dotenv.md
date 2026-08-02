@@ -16,16 +16,19 @@ Pasting a key into chat is worse: it lives in the conversation (and often in
 JSONL transcripts) forever.
 
 key-amnesia stores values in an encrypted vault. Agents trigger
-`ka run --secret NAME --as ENVVAR -- <command>`; injection happens in the
-child environment; scrubbed output comes back. There is no "get secret" API
-for the agent.
+`ka run --secret NAME --as NAME=ENVVAR -- <command>`; injection happens in the
+child environment; scrubbed output comes back. `--as` must be
+`NAME=ENVVAR` (or omit `--as` and inject under the secret name). There is no
+"get secret" API for the agent.
 
 Find plaintext with:
 
 ```bash
 ka scan
+ka scan --no-import   # report only
 ```
 
 The headline looks like: `N LEAK found — your agent can read N secrets in
 this project`. Names, paths, and counts only — never values. After the
-report you can store selected dotenv findings into a project vault.
+report you can store selected dotenv findings into a project vault (TTY
+import path), or migrate a known file with `ka import`.

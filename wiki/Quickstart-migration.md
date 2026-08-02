@@ -6,12 +6,22 @@ Goal: get off plaintext `.env` faster than deciding whether to.
 # Inside a project
 ka init --project          # creates .amnesia/; gitignores it
 ka import .env             # TTY-only; never prints values
-ka scan                    # find remaining LEAKs
-ka run --secret NAME --as NAME -- <command>
+ka scan                    # find remaining LEAKs; may offer import
+ka run --secret NAME --as NAME=ENVVAR -- <command>
 ```
+
+Order matters: **import → scan → run**. Import moves a known dotenv file into
+the vault; scan finds what is still readable as plaintext; run injects by
+name so the agent never sees values.
+
+`--as` takes **`NAME=ENVVAR`** (vault secret name = target environment
+variable). Omit `--as` and `--secret NAME` alone injects as `NAME`. Wrong
+forms such as `--as API_KEY`, `--as NAME`, or `--as ENVVAR` are rejected.
 
 ## `ka import`
 
+- TTY-only — run it in your own console. Collision, delete/rename, and
+  gitignore decisions are interactive confirms; there is no agent path.
 - Parses dotenv `NAME=value` pairs into the resolved vault (project vault
   when `.amnesia/` is found).
 - Collisions default to **skip**; overwrite only on explicit confirm.
@@ -24,13 +34,19 @@ ka run --secret NAME --as NAME -- <command>
 Reports Locally Exposed Agent Keys — filenames and light patterns. Default
 exclusions skip `node_modules`, `.venv`/`venv`, common build dirs, and
 `.git` internals (`--include-excluded` to include). Git-history scanning is
-**not** in the default path.
+**not** a feature of the default path (or of this tool's advertised
+workflow).
+
+After the human report, an interactive TTY may offer to store selected
+importable dotenv hits into the project vault (password still required).
+Use report-only when you do not want that offer:
 
 ```bash
 ka scan
-ka scan --deep      # + home/shell/MCP paths
-ka scan --json      # machine-readable; report-only
-ka scan --yes       # import all importable dotenv hits (password still required)
+ka scan --no-import   # report only; never offer vault import
+ka scan --deep        # + home/shell/MCP paths
+ka scan --json        # machine-readable; report-only
+ka scan --yes         # import all importable dotenv hits (password still required)
 ```
 
 ## Session modes

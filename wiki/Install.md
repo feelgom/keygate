@@ -9,8 +9,12 @@ or from a local clone: `pip install .`. You get both `key-amnesia` and the
 `ka` alias.
 
 Windows and Linux are supported. macOS isolated-console spawn is
-**experimental** (PID-file wrapper; visible Terminal.app window unconfirmed)
-— see [macOS](macOS).
+**experimental** (PID-file wrapper around Terminal.app / osascript; visible
+window path unconfirmed by a real Mac user) — see [macOS](macOS).
+
+Kernel peer-identity admission on macOS is **not** supported: lookup fails
+closed, so a macOS guard cannot admit clients the way Windows/Linux do.
+Experimental console spawn does not change that.
 
 ## Agent setup
 
