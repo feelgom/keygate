@@ -36,8 +36,9 @@ ka setup                          # skills + secret-guard hook for Claude Code /
 ka init --project                 # or: ka init  for a global vault
 ka import .env                    # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
-ka run --secret API_KEY --as API_KEY -- python my_script.py
+ka run --secret API_KEY -- python my_script.py
 ```
+
 
 `ka init` asks for the master password twice; if the entries do not match, nothing is created. **There is no recovery** if you forget that password — Argon2id + SecretBox leave none by design.
 

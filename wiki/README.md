@@ -3,6 +3,10 @@
 These markdown files are **first drafts** for the live GitHub wiki at
 [https://github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki).
 
+**Docs as of 0.4.2** — in-repo wording targets that release. This file does
+**not** claim the live wiki has already been published; until publish,
+`ka docs` may hit an empty or redirecting wiki URL.
+
 They are kept in-repo so PRs can review IA and wording before (or instead of)
 pushing to the separate wiki git remote. `ka docs` always opens/prints that
 wiki URL — not these paths.
@@ -22,14 +26,21 @@ Option B — treat this tree as the source of truth and sync periodically.
 GitHub wiki page titles come from filenames (`Home.md` → Home,
 `Why-not-dotenv.md` → Why not dotenv). `_Sidebar.md` renders the left nav.
 
+**Never copy this `README.md` into the wiki publish set** — it is
+maintainer publish instructions only.
+
+After a successful publish, update the “last published” note here (still
+keep docs-as-of version accurate). Last published: *not yet* (drafts only).
+
 ## Proposed IA
 
 | Page | Purpose |
 |------|---------|
-| [Home](Home.md) | Pitch + links; why agents need a vault |
+| [Home](Home.md) | Pitch + 30s path + TOC; docs as of version |
 | [Why-not-dotenv](Why-not-dotenv.md) | `.env` / LEAK framing |
 | [Install](Install.md) | pip, `ka setup`, agent bootstrap |
 | [Quickstart-migration](Quickstart-migration.md) | `ka import` → `ka scan` → `ka run` |
+| [Agent-usage](Agent-usage.md) | Agent-first path; status/list first; human-only |
 | [Project-vaults](Project-vaults.md) | `.amnesia/`, merge, `--env` |
 | [Manifest-and-check](Manifest-and-check.md) | `amnesia.toml`, `ka check`, CI |
 | [Guard-and-admission](Guard-and-admission.md) | unlock, peer identity, pre-admit |
