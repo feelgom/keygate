@@ -3,7 +3,8 @@
 These markdown files are **first drafts** for the live GitHub wiki at
 [https://github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki).
 
-**Docs as of 0.4.2** — in-repo wording targets that release. Live wiki published for 0.4.2.
+**Docs as of 0.4.3** — in-repo wording targets that release. Live wiki last
+published for 0.4.2 (sync Install / Commands / Agent-usage after merge).
 
 
 They are kept in-repo so PRs can review IA and wording before (or instead of)
@@ -29,7 +30,8 @@ GitHub wiki page titles come from filenames (`Home.md` → Home,
 maintainer publish instructions only.
 
 After a successful publish, update the “last published” note here (still
-keep docs-as-of version accurate). Last published: 0.4.2 (live wiki).
+keep docs-as-of version accurate). Last published: 0.4.2 (live wiki; 0.4.3
+in-repo drafts pending publish).
 
 ## Proposed IA
 

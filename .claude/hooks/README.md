@@ -8,4 +8,8 @@ Install it (and the agent skills) with:
 ka setup
 ```
 
-This merges a `PreToolUse` entry into `~/.claude/settings.json` (and a `preToolUse` entry into `~/.cursor/hooks.json` for Cursor) that runs the `key-amnesia-hook` console script. There is now exactly one canonical copy of the hook (inside the installed package); this directory is a pointer only.
+This merges a `PreToolUse` entry into `~/.claude/settings.json`, a
+`preToolUse` entry into `~/.cursor/hooks.json` for Cursor, and a `PreToolUse`
+entry into `~/.codex/hooks.json` for Codex that runs the `key-amnesia-hook`
+console script. There is now exactly one canonical copy of the hook (inside
+the installed package); this directory is a pointer only.

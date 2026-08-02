@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""PreToolUse / preToolUse secret guard: blocking hook for Claude Code and Cursor.
+"""PreToolUse / preToolUse secret guard: blocking hook for Claude Code, Cursor, Codex.
 
-Inspects a pending tool call (Bash/Shell command, or Write/Edit file content) for
-inline credential-shaped tokens and **denies** the call when one is found,
-pointing the agent at ``ka set`` / ``ka run`` instead.
+Inspects a pending tool call (Bash/Shell command, Write/Edit file content, or
+Codex ``apply_patch``) for inline credential-shaped tokens and **denies** the
+call when one is found, pointing the agent at ``ka set`` / ``ka run`` instead.
 
-Two host contracts are implemented from the same detection logic:
+Host contracts from the same detection logic:
 
-- Claude Code ``PreToolUse``: stdin JSON with ``tool_name`` / ``tool_input``;
-  deny reply uses ``hookSpecificOutput.permissionDecision``.
+- Claude Code / Codex ``PreToolUse``: stdin JSON with ``tool_name`` /
+  ``tool_input``; deny reply uses ``hookSpecificOutput.permissionDecision``.
+  Codex shares Claude's deny shape (no separate contract).
 - Cursor ``preToolUse``: stdin JSON with ``tool_name`` / ``tool_input`` (plus
   Cursor-only fields like ``cursor_version`` / ``conversation_id``); deny
   reply uses the flatter ``{"permission": "deny", ...}`` shape.
@@ -185,7 +186,11 @@ def find_finding(text: str) -> str | None:
 
 
 def detect_host(payload: dict[str, Any]) -> str:
-    """Distinguish Cursor's flatter preToolUse payload from Claude's PreToolUse."""
+    """Distinguish Cursor's flatter preToolUse payload from Claude/Codex PreToolUse.
+
+    Codex uses the Claude-shaped deny contract; without Cursor-only markers we
+    return ``claude`` (covers Claude Code and Codex).
+    """
     if "cursor_version" in payload or "conversation_id" in payload:
         return "cursor"
     event = str(payload.get("hook_event_name") or "")
@@ -218,7 +223,7 @@ def deny_cursor(kind: str) -> dict[str, Any]:
     }
 
 
-_ALLOWED_TOOL_NAMES = {"bash", "shell", "write", "edit", "multiedit"}
+_ALLOWED_TOOL_NAMES = {"bash", "shell", "write", "edit", "multiedit", "apply_patch"}
 
 
 def main() -> int:

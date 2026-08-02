@@ -70,6 +70,6 @@ never ask them to paste the result back into chat:
 
 ## Related
 
-Bundled skill: `key-amnesia-usage` (installed by `ka setup`). Longer
-operator notes: repository `docs/agent-usage.md`. Migration flow:
-[Quickstart migration](Quickstart-migration).
+Bundled skill: `key-amnesia-usage` (installed by `ka setup` for Claude Code,
+Cursor, and Codex). Longer operator notes: repository `docs/agent-usage.md`.
+Migration flow: [Quickstart migration](Quickstart-migration).

@@ -169,6 +169,19 @@ def test_main_write_tool_scans_contents(monkeypatch, capsys) -> None:
     assert reply is not None
 
 
+def test_main_codex_apply_patch_blocks_claude_shape(monkeypatch, capsys) -> None:
+    """Codex apply_patch uses Claude-shaped PreToolUse deny."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Update File: .env\n+" + "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_main_clean_command_allows(monkeypatch, capsys) -> None:
     payload = {
         "hook_event_name": "PreToolUse",

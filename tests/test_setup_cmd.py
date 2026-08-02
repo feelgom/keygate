@@ -33,12 +33,17 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_setup_copies_all_skills_to_both_hosts(fake_home: Path) -> None:
     rc = sc.cmd_setup(_ns())
     assert rc == 0
-    for host_dir in ("claude", "cursor"):
+    for host_dir in ("claude", "cursor", "agents"):
+        root = fake_home / f".{host_dir}" / "skills"
         for name in sc.SKILL_NAMES:
-            dest = fake_home / f".{host_dir}" / "skills" / name / "SKILL.md"
+            dest = root / name / "SKILL.md"
             assert dest.exists()
             content = dest.read_text(encoding="utf-8")
             assert content.startswith("---\nname: " + name)
+    for name in sc.SKILL_NAMES:
+        dest = fake_home / ".codex" / "skills" / name / "SKILL.md"
+        assert dest.exists()
+        assert dest.read_text(encoding="utf-8").startswith("---\nname: " + name)
 
 
 def test_setup_skill_content_matches_package_source(fake_home: Path) -> None:
@@ -67,15 +72,21 @@ def test_setup_skills_only_skips_hook_files(fake_home: Path) -> None:
     sc.cmd_setup(_ns(skills_only=True))
     assert not (fake_home / ".claude" / "settings.json").exists()
     assert not (fake_home / ".cursor" / "hooks.json").exists()
+    assert not (fake_home / ".codex" / "hooks.json").exists()
     assert (fake_home / ".claude" / "skills" / sc.SKILL_NAMES[0] / "SKILL.md").exists()
+    assert (fake_home / ".agents" / "skills" / sc.SKILL_NAMES[0] / "SKILL.md").exists()
+    assert (fake_home / ".codex" / "skills" / sc.SKILL_NAMES[0] / "SKILL.md").exists()
 
 
 def test_setup_hook_only_skips_skills(fake_home: Path) -> None:
     sc.cmd_setup(_ns(hook_only=True))
     assert not (fake_home / ".claude" / "skills").exists()
     assert not (fake_home / ".cursor" / "skills").exists()
+    assert not (fake_home / ".agents" / "skills").exists()
+    assert not (fake_home / ".codex" / "skills").exists()
     assert (fake_home / ".claude" / "settings.json").exists()
     assert (fake_home / ".cursor" / "hooks.json").exists()
+    assert (fake_home / ".codex" / "hooks.json").exists()
 
 
 def test_setup_rejects_both_only_flags(fake_home: Path, capsys) -> None:
@@ -200,6 +211,75 @@ def test_claude_hooks_matcher_is_bash_write_edit(fake_home: Path) -> None:
     path = fake_home / ".claude" / "settings.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["hooks"]["PreToolUse"][0]["matcher"] == sc.CLAUDE_MATCHER
+
+
+# --- Codex hooks.json merge -------------------------------------------------
+
+
+def test_codex_hooks_merge_preserves_unrelated_entries(fake_home: Path) -> None:
+    path = fake_home / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "description": "workspace hooks",
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "some-other-hook"}],
+                        }
+                    ],
+                    "PostToolUse": [{"matcher": "*", "hooks": []}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sc.cmd_setup(_ns(hook_only=True))
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["description"] == "workspace hooks"
+    assert "PostToolUse" in data["hooks"]
+    matchers = [entry["matcher"] for entry in data["hooks"]["PreToolUse"]]
+    assert "Bash" in matchers
+    commands = [
+        h["command"]
+        for entry in data["hooks"]["PreToolUse"]
+        for h in entry["hooks"]
+    ]
+    assert "some-other-hook" in commands
+    assert any("key-amnesia" in c or "secret_guard" in c for c in commands)
+
+
+def test_codex_hooks_merge_idempotent(fake_home: Path) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    path = fake_home / ".codex" / "hooks.json"
+    first = json.loads(path.read_text(encoding="utf-8"))
+
+    sc.cmd_setup(_ns(hook_only=True))
+    second = json.loads(path.read_text(encoding="utf-8"))
+
+    assert len(second["hooks"]["PreToolUse"]) == len(first["hooks"]["PreToolUse"]) == 1
+
+
+def test_codex_hooks_matcher_includes_apply_patch(fake_home: Path) -> None:
+    sc.cmd_setup(_ns(hook_only=True))
+    path = fake_home / ".codex" / "hooks.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["hooks"]["PreToolUse"][0]["matcher"] == sc.CODEX_MATCHER
+
+
+def test_codex_home_env_redirects_skills_and_hooks(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom = tmp_path / "custom-codex"
+    monkeypatch.setenv("CODEX_HOME", str(custom))
+    sc.cmd_setup(_ns())
+    assert (custom / "skills" / sc.SKILL_NAMES[0] / "SKILL.md").exists()
+    assert (custom / "hooks.json").exists()
+    assert not (fake_home / ".codex" / "hooks.json").exists()
 
 
 # --- PATH check --------------------------------------------------------------

@@ -342,7 +342,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # setup (agent distribution: skills + PreToolUse/preToolUse hook)
     p_setup = sub.add_parser(
         "setup",
-        help="Install agent skills and the secret-guard hook for Claude Code / Cursor",
+        help="Install agent skills and the secret-guard hook for Claude Code / Cursor / Codex",
     )
     p_setup.add_argument(
         "--skills-only",
