@@ -112,6 +112,13 @@ def test_reminder_suppressed_once_inside_extend_window(monkeypatch) -> None:
         authkey=b"a" * 32,
     )
 
+    # Force-stop shortly after hard expiry so a leftover accept thread or a
+    # poisoned concurrent guard cannot hang this test in CI.
+    def _stop_after_expiry() -> None:
+        time.sleep(1.5)
+        state.stop.set()
+
+    threading.Thread(target=_stop_after_expiry, daemon=True).start()
     guard_serve(state, _NeverConnectsListener())
 
     assert not any("remaining" in r for r in reminders)
