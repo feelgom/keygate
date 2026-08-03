@@ -10,6 +10,35 @@ import pytest
 from key_amnesia.peer_identity import PeerIdentity
 
 
+def assert_ka_paths_isolated(tmp_path: Path) -> None:
+    """Fail loudly if vault/audit/lock resolve outside pytest's tmp root.
+
+    Belt-and-braces for Defect 1: a silent regression that points
+    KEY_AMNESIA_HOME at a real home must not be able to pass the suite.
+    """
+    from key_amnesia.paths import audit_log_path, data_dir, guard_lock_path
+
+    root = tmp_path.resolve()
+    checks = (
+        ("data_dir", data_dir()),
+        ("audit_log_path", audit_log_path()),
+        ("guard_lock_path", guard_lock_path()),
+    )
+    for label, path in checks:
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root):
+            pytest.fail(
+                f"KEY_AMNESIA {label} resolved outside pytest tmp: {resolved} "
+                f"(expected under {root})"
+            )
+
+
+def stub_interactive_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both streams must look like a TTY for inline auth (0.4.4 dual-stream)."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+
 @pytest.fixture
 def stub_peer_identity(monkeypatch: pytest.MonkeyPatch) -> PeerIdentity:
     """Stand-in kernel peer for tests that exercise real IPC admission.
@@ -30,13 +59,41 @@ def stub_peer_identity(monkeypatch: pytest.MonkeyPatch) -> PeerIdentity:
     return peer
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def ka_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect KEY_AMNESIA_HOME under pytest tmp — never ~/.key-amnesia."""
     home = tmp_path / "ka-home"
     home.mkdir()
     monkeypatch.setenv("KEY_AMNESIA_HOME", str(home))
     monkeypatch.delenv("KEY_AMNESIA_VAULT_PATH", raising=False)
+    assert_ka_paths_isolated(tmp_path)
     return home
+
+
+@pytest.fixture(autouse=True)
+def block_real_isolated_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never open a real CREATE_NEW_CONSOLE / Terminal window during pytest.
+
+    Agent harnesses often look non-TTY on stdout, so `require_human_auth`
+    takes the spawned-console path. Without this guard the suite pops real
+    password windows on the developer's desktop. Tests that exercise spawn
+    must pass `popen_fn=` (or mock `spawn_isolated_console` themselves).
+    """
+    from key_amnesia import platform as platform_mod
+    from key_amnesia import prompt_route as prompt_route_mod
+
+    real = platform_mod.spawn_isolated_console
+
+    def _guarded(cmd, env, *, popen_fn=None):
+        if popen_fn is None:
+            raise OSError(
+                "pytest blocked real isolated-console spawn; "
+                "pass popen_fn= to require_human_auth or mock spawn_isolated_console"
+            )
+        return real(cmd, env, popen_fn=popen_fn)
+
+    monkeypatch.setattr(platform_mod, "spawn_isolated_console", _guarded)
+    monkeypatch.setattr(prompt_route_mod, "spawn_isolated_console", _guarded)
 
 
 @pytest.fixture

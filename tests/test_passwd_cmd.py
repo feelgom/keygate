@@ -23,6 +23,7 @@ def test_passwd_happy_path_reencrypts_with_fresh_salt(
     seeded_vault: Path, password: str, monkeypatch
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
     old_salt = _salt_of(seeded_vault)
 
@@ -48,6 +49,7 @@ def test_passwd_alias_change_password(
     seeded_vault: Path, password: str, monkeypatch
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
     answers = iter([password, "another-new-password", "another-new-password"])
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(answers))
@@ -71,6 +73,7 @@ def test_passwd_mismatch_aborts_without_changing_vault(
     seeded_vault: Path, password: str, monkeypatch
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
     before = seeded_vault.read_bytes()
 
@@ -88,6 +91,7 @@ def test_passwd_wrong_current_password_aborts(
     seeded_vault: Path, password: str, monkeypatch
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
     before = seeded_vault.read_bytes()
 
@@ -110,6 +114,7 @@ def test_passwd_requires_tty(seeded_vault: Path, monkeypatch, capsys) -> None:
 def test_passwd_no_vault_refuses(ka_home, monkeypatch, capsys) -> None:
     monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     rc = main(["passwd"])
     err = capsys.readouterr().err
     assert rc == 1

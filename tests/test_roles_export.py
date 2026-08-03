@@ -119,6 +119,7 @@ def test_runner_denies_reveal(ka_home: Path, password: str, monkeypatch, capsys)
     save_vault(vault, password, payload)
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
 
     rc = main(["reveal", "api_key"])
@@ -180,6 +181,7 @@ def test_remove_member_warns_to_rotate(
     save_vault(vault, password, payload)
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
 
     # Clear local identity so role policy doesn't interfere (we aren't a member).
@@ -201,6 +203,7 @@ def test_member_add_cli_migrates_with_yes(
     _sk, pk = crypto.generate_box_keypair()
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
 
     rc = main(

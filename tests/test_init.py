@@ -16,6 +16,7 @@ def test_init_mismatch_creates_nothing(
     ka_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     answers = iter(["first-password", "second-password"])
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(answers))
 
@@ -31,6 +32,7 @@ def test_init_match_creates_unlockable_vault(
     ka_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     pw = "same-confirmed-password"
     answers = iter([pw, pw])
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(answers))
@@ -46,6 +48,7 @@ def test_init_refuses_if_vault_exists(
     seeded_vault: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     before = seeded_vault.read_bytes()
     # Would create if somehow allowed — must not be called successfully
     monkeypatch.setattr(
@@ -65,6 +68,7 @@ def test_set_without_vault_refuses(
 ) -> None:
     # Even with a TTY, set must refuse before auth when vault is missing
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
     rc = main(["set", "SOME_KEY", "value"])
     err = capsys.readouterr().err

@@ -74,6 +74,7 @@ def test_init_project_creates_vault_config_gitignore(
     proj.mkdir()
     monkeypatch.chdir(proj)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     pw = "project-master-pw"
     answers = iter([pw, pw])
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(answers))
@@ -97,6 +98,7 @@ def test_init_project_env_path(
     proj.mkdir()
     monkeypatch.chdir(proj)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     pw = "env-pw"
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": pw)
 
@@ -284,6 +286,7 @@ def test_import_targets_project_vault(
     proj = _make_project(tmp_path, use_global=False)
     monkeypatch.chdir(proj)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     pw = "import-proj-pw"
     vault_mod.save_vault(project_vault_path(proj), pw, {"secrets": {}})
 

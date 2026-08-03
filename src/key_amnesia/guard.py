@@ -258,16 +258,39 @@ def guard_request(
     `client_name` is a **display-only** label (never a credential — see
     `--name` / `KEY_AMNESIA_CLIENT_NAME`), defaulted here from the
     environment so every guard-talking command picks it up automatically.
+
+    Connectivity / protocol failures return `None` after writing a
+    `guard-session` / `warn` audit entry — never silently.
     """
-    conn = connect_guard(path=lock_path)
-    if conn is None:
-        return None
     out = dict(msg)
     out.setdefault("client_name", os.environ.get("KEY_AMNESIA_CLIENT_NAME", ""))
+    action = str(out.get("verb") or out.get("action") or "guard")
+    secret_names = [str(n) for n in (out.get("secret_names") or [])] or None
+    command = [str(c) for c in (out.get("command") or [])] or None
+
+    def _abandon(reason: str) -> None:
+        audit_event(
+            action,
+            secret_names=secret_names,
+            command=command,
+            route="guard-session",
+            result="warn",
+            reason=reason,
+            path=None,
+        )
+
+    conn = connect_guard(path=lock_path)
+    if conn is None:
+        _abandon("guard connect failed")
+        return None
     try:
         ipc.send_msg(conn, out)
         reply = ipc.recv_msg(conn, timeout=timeout)
-    except Exception:
+    except (OSError, TimeoutError, EOFError, ConnectionError, ValueError) as exc:
+        _abandon(f"{type(exc).__name__}: {exc}")
+        return None
+    except Exception as exc:  # noqa: BLE001 — never drop the reason
+        _abandon(f"{type(exc).__name__}: {exc}")
         return None
     finally:
         try:
@@ -785,7 +808,12 @@ def list_guard_registry_entries() -> list[dict[str, Any]]:
 
 def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[str, Any]:
     if time.time() > state.expires_at and verb not in ("lock", "status"):
-        return {"ok": False, "reason": "session expired", "expired": True}
+        return {
+            "ok": False,
+            "reason": "session expired",
+            "expired": True,
+            "code": "session_expired",
+        }
 
     # Only verbs that consult state.secrets need a freshness check.
     if verb in ("run", "list", "status"):
@@ -836,7 +864,11 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
     if verb == "renew":
         minutes = int(msg.get("minutes") or 30)
         if minutes < 1:
-            return {"ok": False, "reason": "invalid minutes"}
+            return {
+                "ok": False,
+                "reason": "invalid minutes",
+                "code": "invalid_minutes",
+            }
         state.expires_at = time.time() + minutes * 60
         write_guard_lock(state.address, state.authkey, state.pid, state.expires_at)
         audit_event(
@@ -857,7 +889,7 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
         command = list(msg.get("command") or [])
         cwd = msg.get("cwd") or None
         if not command:
-            return {"ok": False, "reason": "no command"}
+            return {"ok": False, "reason": "no command", "code": "no_command"}
         missing = [n for n in secret_names if n not in state.secrets]
         if missing:
             audit_event(
@@ -868,7 +900,11 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
                 result="denied",
                 reason=f"unknown secrets: {', '.join(missing)}",
             )
-            return {"ok": False, "reason": f"unknown secrets: {', '.join(missing)}"}
+            return {
+                "ok": False,
+                "reason": f"unknown secrets: {', '.join(missing)}",
+                "code": "unknown_secret",
+            }
         env_inject = {
             inject_as.get(n, n): state.secrets[n] for n in secret_names
         }
@@ -897,9 +933,17 @@ def _dispatch_verb(verb: str, msg: dict[str, Any], state: GuardState) -> dict[st
             result="denied",
             reason="guard has no value-return verbs",
         )
-        return {"ok": False, "reason": "guard does not expose secret values"}
+        return {
+            "ok": False,
+            "reason": "guard does not expose secret values",
+            "code": "value_return_refused",
+        }
 
-    return {"ok": False, "reason": f"unknown verb: {verb}"}
+    return {
+        "ok": False,
+        "reason": f"unknown verb: {verb}",
+        "code": "unknown_verb",
+    }
 
 
 def guard_handle_message(
@@ -919,14 +963,19 @@ def guard_handle_message(
     dispatch is only via `guard_handle_message_legacy` (tests only).
     """
     if not isinstance(msg, dict):
-        return {"ok": False, "reason": "invalid message"}
+        return {"ok": False, "reason": "invalid message", "code": "invalid_message"}
 
     verb = str(msg.get("verb") or msg.get("action") or "")
     state.request_count += 1
 
     admitted, new_token = _check_admission(peer, msg, state, verb, admit_prompt)
     if not admitted:
-        return {"ok": False, "reason": "admission denied", "admitted": False}
+        return {
+            "ok": False,
+            "reason": "admission denied",
+            "admitted": False,
+            "code": "admission_denied",
+        }
 
     reply = _dispatch_verb(verb, msg, state)
     if new_token:

@@ -208,6 +208,7 @@ def test_ka_run_fails_on_missing_required(
     )
     monkeypatch.chdir(root)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": pw)
 
     # Even requesting a present secret must fail the preflight first.
@@ -231,6 +232,7 @@ def test_ka_run_ok_when_all_required_present(
     generate_or_merge_manifest(["API_KEY"], root)
     monkeypatch.chdir(root)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": pw)
 
     rc = main(
