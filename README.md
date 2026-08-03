@@ -22,7 +22,7 @@
 
 Your choices used to be ugly: paste the key, leave it in plaintext where the agent can read it, or do that part yourself.
 
-**key-amnesia is the fourth option.** Secrets live in an encrypted vault. The agent triggers commands that *use* them — values are injected into the child process environment, out of the agent's sight. If a command prints a secret, key-amnesia censors it before the agent sees the output. The master password can only ever be typed by you, at a real keyboard: when an agent needs approval, a **separate console window** pops up — one the agent cannot read or type into.
+**key-amnesia is the fourth option.** Secrets live in an encrypted vault. The agent triggers commands that *use* them — values are injected into the child process environment, out of the agent's sight. If a command prints a secret, key-amnesia censors it before the agent sees the output. The master password can only ever be typed by you, at a real keyboard: when an agent needs approval, a **separate console window** pops up — one the agent cannot read or type into. Auth routing requires both stdin and stdout to look like a TTY before prompting inline; set `KEY_AMNESIA_NONINTERACTIVE=1` in agent harnesses to always force that window.
 
 The agent gets amnesia. That's the whole point.
 

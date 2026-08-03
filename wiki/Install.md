@@ -57,3 +57,15 @@ this project:
 ka docs          # print URL + best-effort browser open
 ka docs --print  # URL only
 ```
+
+## Environment notes
+
+| Variable | Effect |
+|----------|--------|
+| `KEY_AMNESIA_HOME` | Override data dir (default `~/.key-amnesia`) |
+| `KEY_AMNESIA_VAULT_PATH` | Override vault file path |
+| `KEY_AMNESIA_NONINTERACTIVE=1` | Force spawned-console auth (never inline `getpass`), even if both streams claim to be a TTY — use in agent harnesses |
+| `KEY_AMNESIA_CLIENT_NAME` | Display-only label on guard IPC (not a credential) |
+| `KEY_AMNESIA_HOOK_DISABLE=1` | Disable the secret-guard hook |
+
+Auth routing requires **both** stdin and stdout to look like a TTY before prompting inline; otherwise `ka` opens an isolated console the human can see.

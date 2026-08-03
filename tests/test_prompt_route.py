@@ -157,3 +157,57 @@ def test_helper_parent_death_cancels(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     rc = run_prompt_helper()
     assert rc != 0
+
+
+def test_stdin_tty_stdout_not_routes_spawned(ka_home, monkeypatch) -> None:
+    """Agent harness shape: pty on stdin, redirected stdout → spawned-console."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    monkeypatch.delenv(prompt_route.ENV_NONINTERACTIVE, raising=False)
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.terminate = MagicMock()
+        return proc
+
+    req = PromptRequest(action="reveal", secret_names=["api_key"])
+    outcome = require_human_auth(req, timeout_s=2, popen_fn=fake_popen)
+    assert outcome.route == "spawned-console"
+    assert outcome.ok is False
+    assert "cmd" in captured
+
+
+def test_noninteractive_env_forces_spawn_even_when_tty(ka_home, monkeypatch) -> None:
+    monkeypatch.setenv(prompt_route.ENV_NONINTERACTIVE, "1")
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.terminate = MagicMock()
+        return proc
+
+    req = PromptRequest(action="reveal", secret_names=["x"])
+    outcome = require_human_auth(
+        req,
+        timeout_s=2,
+        popen_fn=fake_popen,
+        isatty_fn=lambda: True,
+    )
+    assert outcome.route == "spawned-console"
+    assert outcome.ok is False
+    assert "kwargs" in captured
+
+
+def test_isatty_requires_both_streams(monkeypatch) -> None:
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+    assert prompt_route._isatty() is False
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    assert prompt_route._isatty() is True

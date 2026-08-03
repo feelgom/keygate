@@ -28,6 +28,8 @@ ENV_AUTHKEY = "KEY_AMNESIA_PROMPT_AUTHKEY"
 ENV_ADDRESS = "KEY_AMNESIA_PROMPT_ADDRESS"
 ENV_PARENT_PID = "KEY_AMNESIA_PROMPT_PARENT_PID"
 ENV_TIMEOUT = "KEY_AMNESIA_PROMPT_TIMEOUT"
+# Force spawned-console even when both streams claim to be a TTY (agent harnesses).
+ENV_NONINTERACTIVE = "KEY_AMNESIA_NONINTERACTIVE"
 
 
 @dataclass
@@ -62,11 +64,28 @@ class AuthOutcome:
     status_only: dict[str, Any] | None = None
 
 
+def _env_noninteractive() -> bool:
+    v = os.environ.get(ENV_NONINTERACTIVE, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _isatty() -> bool:
+    """True only when *both* stdin and stdout look like a TTY.
+
+    Agent harnesses often attach a pty to stdin while redirecting stdout.
+    stdin-only checks then select the unanswerable inline path; requiring
+    both streams avoids that failure mode. Still a heuristic — see
+    KEY_AMNESIA_NONINTERACTIVE to force the spawned-console route.
+    """
     try:
-        return sys.stdin.isatty()
+        in_tty = sys.stdin.isatty()
     except Exception:
-        return False
+        in_tty = False
+    try:
+        out_tty = sys.stdout.isatty()
+    except Exception:
+        out_tty = False
+    return bool(in_tty and out_tty)
 
 
 def _prompt_password_inline(request: PromptRequest, timeout_s: int | None = None) -> str:
@@ -146,7 +165,12 @@ def require_human_auth(
     if timeout_s is None:
         timeout_s = int(cfg.get("prompt-timeout-seconds", 90))
 
-    tty = (isatty_fn or _isatty)()
+    # Env wins over stream heuristics / injected isatty_fn — agent harnesses
+    # that look like a TTY but cannot answer must force the visible console.
+    if _env_noninteractive():
+        tty = False
+    else:
+        tty = (isatty_fn or _isatty)()
     if tty:
         try:
             if password_provider is not None:

@@ -12,6 +12,8 @@ Python prototype CLI (`key-amnesia` / `ka`) for Windows-primary use. Encrypted v
 
 **0.3.7 (bugfix, no CLI-surface / no IPC-verb changes):** fixed the guard's stale in-memory secrets snapshot (README limit 11 / "Known limitation" below). `GuardState` gained `vault_path`, `vault_key` (derived SecretBox key only — never the password), and `vault_content_fingerprint`; `run`/`list`/`status` now call `_maybe_reload_secrets`, which re-opens the vault with the retained key (no Argon2id) whenever the fingerprint changes. `cmd_unlock` switched from `load_vault` to `load_vault_with_key` to obtain that key without deriving it twice; `vault.py` gained `load_vault_with_key`, `load_vault_with_retained_key`, and `vault_fingerprint`. Verb set is unchanged — still exactly `{run, list, lock, status, renew}`; no `reload` verb was added (`tests/test_guard_verbs_regression.py` untouched). New exposure: the guard now retains **derived key material** for the session (see "Who holds plaintext" and the note under GuardState below) — same trust tier as the plaintext secrets it already held, but worth naming explicitly. `tests/test_guard_reload.py`.
 
+**0.4.4 (test isolation + agent-harness TTY + guard visibility):** Suite `ka_home` is `autouse` with fail-if-outside-tmp. Auth routing requires stdin **and** stdout TTY for inline; `KEY_AMNESIA_NONINTERACTIVE` forces spawned-console. `guard_request` audits IPC abandon as `warn`; guard replies carry structured `code`; `ka run`/`list` print why the guard path was abandoned. Version `0.4.4`.
+
 **0.4.3 (Codex support; no IPC-verb changes):** `ka setup` also installs the three packaged skills into `~/.agents/skills/` and `~/.codex/skills/` (`$CODEX_HOME`), and merges a Codex `PreToolUse` hook into `~/.codex/hooks.json` (matcher `Bash|Write|Edit|apply_patch`). Secret-guard allows `apply_patch`. Docs/README/wiki note Codex restart + `/hooks` trust. Version `0.4.3`.
 
 **0.4.2 (review hardening; no IPC-verb changes):** `migrate_kam1_to_kam2` requires `confirm=` unconditionally (announce alone can no longer migrate). Windows ancestor walk takes one `CreateToolhelp32Snapshot` per chain. `guard_handle_message` requires keyword-only `peer=` (no default); legacy opaque-token path is `guard_handle_message_legacy` (tests only). Five-verb regression covers both legacy and kernel admission. Linux `SO_PEERCRED` compares kernel uid to `os.geteuid()` and fails closed on mismatch. Optional `@pytest.mark.slow` for process-spawning tests. Version `0.4.2`.
@@ -338,7 +340,8 @@ Written by the guard on **every** exit path — `started_at`, `ended_at`, `reaso
 
 ```
 Needs human auth
-  → stdin.isatty?
+  → KEY_AMNESIA_NONINTERACTIVE set? → spawn isolated console
+  → else stdin.isatty AND stdout.isatty?
       yes → getpass/input inline → KDF decrypt in-process
       no  → spawn isolated console (bare argv, env handoff)
               → Windows: CREATE_NEW_CONSOLE
@@ -353,7 +356,9 @@ Needs human auth
 
 **`unlock` is the one action a spawned helper console cannot complete.** `ka unlock` blocks in the *caller's own terminal* for the life of the session — a separate spawned console is a different process with a different TTY, so it cannot become that guard on the parent's behalf. A non-interactive `unlock` still routes through the same isatty/spawn logic as every other command (so the routing decision, and its audit trail, stay uniform), but the helper's `unlock` handler refuses immediately with a clear reason (`"unlock must be run in a foreground terminal"`) instead of trying to start anything.
 
-**Known limitation: `isatty()` is a heuristic, not a guarantee of an attentive human.** The routing above assumes a tty-shaped stdin means a real person is present to type a password inline. In practice a pseudo-terminal can exist with nobody actually watching it — observed with an AI coding agent whose own tool harness sometimes allocates a pty for a subprocess it invokes, unpredictably from the caller's side. When that happens, `key-amnesia` takes the inline branch and prints the prompt into a stream nobody reads. **Not fixed** (no reliable way to distinguish "tty-shaped" from "someone is actually there" from inside the process) — named honestly rather than silently left as a mystery. **What is fixed:** the consequence used to be an indefinite hang (`getpass`/`input` block forever with no timeout); inline password entry now runs on a `prompt-timeout-seconds`-bounded thread and fails closed with a clear "prompt timed out" outcome instead of hanging. The guard's own admission prompt (see below) uses the same bounded-thread pattern with a fixed 60s timeout.
+**Known limitation: `isatty()` is a heuristic, not a guarantee of an attentive human.** Routing requires **both** `stdin` and `stdout` to report a TTY before taking the inline path (0.4.4). Agent harnesses commonly attach a pty to stdin while redirecting stdout; the older stdin-only check selected unanswerable inline `getpass` and hung until `prompt-timeout-seconds`. That dual-stream check alone does not prove a human is present. **Override:** set `KEY_AMNESIA_NONINTERACTIVE=1` (also `true`/`yes`/`on`) to force the spawned-console route regardless of what the streams claim. **Still true:** there is no reliable way to distinguish "tty-shaped" from "someone is actually there." Inline password entry remains bounded by `prompt-timeout-seconds` and fails closed with "prompt timed out" instead of hanging forever. The guard's own admission prompt uses the same bounded-thread pattern with a fixed 60s timeout.
+
+Client `ka run` / `ka list` always print why a live guard path was abandoned (unreachable IPC, expired, admission denied, or hard denial codes) before falling back or exiting — abandoned IPC attempts are also written to `audit.log` as `guard-session` / `warn` (0.4.4).
 
 ### Nothing sensitive on argv — ever
 

@@ -54,6 +54,7 @@ def test_set_interactive_inline_never_prints_value(
     """The caller's own terminal (they typed the value themselves) must
     never see it echoed back."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": password)
 
     rc = main(["set", "new_key", SECRET])

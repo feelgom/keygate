@@ -1133,6 +1133,19 @@ def _load_merged_secrets(
     return merge_secret_maps(g_secrets, secrets)
 
 
+# Guard reply `code` values that must hard-stop `ka run` (no password fall-through).
+_GUARD_RUN_HARD_STOP_CODES = frozenset(
+    {
+        "unknown_secret",
+        "no_command",
+        "invalid_message",
+        "value_return_refused",
+        "unknown_verb",
+        "invalid_minutes",
+    }
+)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     ctx = _ctx_from_args(args)
     cmd = list(args.cmd or [])
@@ -1192,15 +1205,28 @@ def cmd_run(args: argparse.Namespace) -> int:
             _write_command_output(sys.stdout, resp.get("scrubbed_stdout", ""))
             _write_command_output(sys.stderr, resp.get("scrubbed_stderr", ""))
             return int(resp.get("exit_code", 0))
-        if resp and resp.get("expired"):
+        if resp is None:
+            theme.warn(
+                "Guard unreachable (IPC failed); falling back to per-call auth."
+            )
+        elif resp.get("expired") or resp.get("code") == "session_expired":
             theme.warn("Guard session expired; falling back to per-call auth.")
-        elif resp and not resp.get("ok"):
-            # Guard reachable but denied (e.g. unknown secret) — don't fall through
-            # with a password prompt unless it's expiry/connectivity.
-            if "unknown" in str(resp.get("reason", "")):
-                theme.error(f"Error: {resp.get('reason')}")
+        elif not resp.get("ok"):
+            code = str(resp.get("code") or "")
+            reason = str(resp.get("reason") or "denied")
+            if code in _GUARD_RUN_HARD_STOP_CODES:
+                theme.error(f"Error: {reason}")
                 return 1
-
+            if code == "admission_denied":
+                theme.warn(
+                    "Guard admission denied; falling back to per-call auth. "
+                    "Approve the next request on the unlock terminal, or use "
+                    "`ka unlock --pre-admit`."
+                )
+            else:
+                theme.warn(
+                    f"Guard declined ({reason}); falling back to per-call auth."
+                )
     request = PromptRequest(
         action="run",
         secret_names=secret_names,
@@ -1266,6 +1292,15 @@ def cmd_list(args: argparse.Namespace) -> int:
             for n in names:
                 theme.out(n)
             return 0
+        if resp is None:
+            theme.warn(
+                "Guard unreachable (IPC failed); listing from vault sidecar names."
+            )
+        elif resp and not resp.get("ok"):
+            theme.warn(
+                f"Guard declined list ({resp.get('reason') or 'denied'}); "
+                "listing from vault sidecar names."
+            )
     if ctx.merge_with_global:
         names = merged_names_from_sidecars(ctx)
     else:
