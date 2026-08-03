@@ -167,15 +167,20 @@ def test_stdin_tty_stdout_not_routes_spawned(ka_home, monkeypatch) -> None:
 
     captured: dict[str, Any] = {}
 
-    def fake_popen(cmd, **kwargs):
+    def fake_spawn(cmd, env, *, popen_fn=None):
+        # Bypass platform DISPLAY/emulator gates — this test is about routing.
         captured["cmd"] = cmd
         proc = MagicMock()
         proc.poll.return_value = 1
         proc.terminate = MagicMock()
+        if popen_fn is not None:
+            return popen_fn(cmd, env=env)
         return proc
 
+    monkeypatch.setattr(prompt_route, "spawn_isolated_console", fake_spawn)
+
     req = PromptRequest(action="reveal", secret_names=["api_key"])
-    outcome = require_human_auth(req, timeout_s=2, popen_fn=fake_popen)
+    outcome = require_human_auth(req, timeout_s=2)
     assert outcome.route == "spawned-console"
     assert outcome.ok is False
     assert "cmd" in captured
@@ -186,23 +191,26 @@ def test_noninteractive_env_forces_spawn_even_when_tty(ka_home, monkeypatch) -> 
 
     captured: dict[str, Any] = {}
 
-    def fake_popen(cmd, **kwargs):
-        captured["kwargs"] = kwargs
+    def fake_spawn(cmd, env, *, popen_fn=None):
+        captured["env"] = env
         proc = MagicMock()
         proc.poll.return_value = 1
         proc.terminate = MagicMock()
+        if popen_fn is not None:
+            return popen_fn(cmd, env=env)
         return proc
+
+    monkeypatch.setattr(prompt_route, "spawn_isolated_console", fake_spawn)
 
     req = PromptRequest(action="reveal", secret_names=["x"])
     outcome = require_human_auth(
         req,
         timeout_s=2,
-        popen_fn=fake_popen,
         isatty_fn=lambda: True,
     )
     assert outcome.route == "spawned-console"
     assert outcome.ok is False
-    assert "kwargs" in captured
+    assert "env" in captured
 
 
 def test_isatty_requires_both_streams(monkeypatch) -> None:
