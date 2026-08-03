@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import conftest
 import pytest
 from _pytest.outcomes import Failed
-
-from tests.conftest import assert_ka_paths_isolated
 
 
 def test_assert_ka_paths_isolated_rejects_outside_tmp(
@@ -18,7 +17,7 @@ def test_assert_ka_paths_isolated_rejects_outside_tmp(
     monkeypatch.setenv("KEY_AMNESIA_HOME", str(outside))
     monkeypatch.delenv("KEY_AMNESIA_VAULT_PATH", raising=False)
     with pytest.raises(Failed, match="outside pytest tmp"):
-        assert_ka_paths_isolated(tmp_path)
+        conftest.assert_ka_paths_isolated(tmp_path)
 
 
 def test_autouse_ka_home_keeps_paths_under_tmp(tmp_path: Path, ka_home: Path) -> None:
