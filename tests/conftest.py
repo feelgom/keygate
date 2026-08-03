@@ -76,21 +76,26 @@ def block_real_isolated_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Agent harnesses often look non-TTY on stdout, so `require_human_auth`
     takes the spawned-console path. Without this guard the suite pops real
-    password windows on the developer's desktop. Tests that exercise spawn
-    must pass `popen_fn=` (or mock `spawn_isolated_console` themselves).
+    password windows on the developer's desktop.
+
+    When *popen_fn* is omitted we still call the real platform helper, but
+    with a popen that refuses to exec — so headless Linux/macOS fail-closed
+    messages (no DISPLAY, etc.) stay product-shaped, while Windows never
+    opens a console. Tests that need a successful spawn pass `popen_fn=`.
     """
     from key_amnesia import platform as platform_mod
     from key_amnesia import prompt_route as prompt_route_mod
 
     real = platform_mod.spawn_isolated_console
 
+    def _blocked_popen(*_a, **_k):
+        raise OSError(
+            "pytest blocked real isolated-console spawn; "
+            "pass popen_fn= to require_human_auth or mock spawn_isolated_console"
+        )
+
     def _guarded(cmd, env, *, popen_fn=None):
-        if popen_fn is None:
-            raise OSError(
-                "pytest blocked real isolated-console spawn; "
-                "pass popen_fn= to require_human_auth or mock spawn_isolated_console"
-            )
-        return real(cmd, env, popen_fn=popen_fn)
+        return real(cmd, env, popen_fn=popen_fn or _blocked_popen)
 
     monkeypatch.setattr(platform_mod, "spawn_isolated_console", _guarded)
     monkeypatch.setattr(prompt_route_mod, "spawn_isolated_console", _guarded)
