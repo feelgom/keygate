@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in key-amnesia does not work as documented
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: No secret values
+      description: Bug reports must never include vault passwords, API keys, tokens, or other secret values — only names, paths, and redacted output.
+      options:
+        - label: I confirm this report does not contain any secret values
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `ka --version`
+      placeholder: key-amnesia 0.4.5
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: Exact command(s), with secret *values* redacted. Secret *names* are fine.
+      placeholder: ka run --secret NAME --as NAME=ENVVAR -- …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead (redact any accidental secret material)
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: Optional — admission flags, session mode, project vs global vault, etc.
+    validations:
+      required: false
