@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.6`.
+Versions follow the git tags `0.4.0` … `0.4.7`.
+
+## [0.4.7] — 2026-08-04
+
+### Changed
+
+- `--admit-tree` prompt labels each offered level by depth (`this client` / `parent` / `grandparent` / `ancestor ↑N`) so it is clear which choice is narrower vs wider trust up the process tree.
 
 ## [0.4.6] — 2026-08-04
 
@@ -71,6 +77,7 @@ Versions follow the git tags `0.4.0` … `0.4.6`.
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.7]: https://github.com/fujitoid/key-amnesia/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/fujitoid/key-amnesia/compare/0.4.5...0.4.6
 [0.4.5]: https://github.com/fujitoid/key-amnesia/compare/0.4.4...0.4.5
 [0.4.4]: https://github.com/fujitoid/key-amnesia/compare/0.4.3...0.4.4

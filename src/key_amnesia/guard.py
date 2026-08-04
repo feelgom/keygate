@@ -532,6 +532,21 @@ def _admit_peer(
     _announce_admission(peer, state.admitted, via=via)
 
 
+def _admit_tree_depth_label(depth: int, *, widest: bool) -> str:
+    """Human label for how far *depth* sits above the connecting client."""
+    if depth <= 0:
+        return "this client (narrowest)"
+    if depth == 1:
+        base = "parent"
+    elif depth == 2:
+        base = "grandparent"
+    else:
+        base = f"ancestor ↑{depth}"
+    if widest:
+        return f"{base} (widest here)"
+    return base
+
+
 def _admit_tree_prompt(
     peer: PeerIdentity,
     msg: dict[str, Any],
@@ -554,11 +569,24 @@ def _admit_tree_prompt(
         label = f"{client_name} ({label})"
     try:
         theme.out(f"Session ({label}) wants: {summary}. Admit process tree?")
+        theme.out(
+            "List order is up the tree: lower numbers = closer to this client "
+            "(narrower trust); higher numbers = parents/ancestors (wider)."
+        )
         if not offerable:
             theme.out("  (no offerable ancestors)")
-        for i, node in enumerate(offerable, start=1):
+        depths: list[int] = []
+        for node in offerable:
+            depth = next(
+                (d for d, c in enumerate(chain) if c.matches(node)),
+                0,
+            )
+            depths.append(depth)
+        max_depth = max(depths) if depths else 0
+        for i, (node, depth) in enumerate(zip(offerable, depths), start=1):
             image = peer_identity.get_process_image_name(node.pid) or "?"
-            theme.out(f"  [{i}] pid {node.pid}  {image}")
+            rank = _admit_tree_depth_label(depth, widest=(depth == max_depth and depth > 0))
+            theme.out(f"  [{i}] {rank}  —  pid {node.pid}  {image}")
         for node, reason in skipped:
             theme.out(f"  (skipped: pid {node.pid} — {reason})")
         if offerable:
