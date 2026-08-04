@@ -85,8 +85,21 @@ review and trust the new hook via `/hooks` before it will run.
 
 ```bash
 ka config set session-mode cached
-ka unlock                           # optional: --pre-admit for the next client
+ka unlock                           # see flags below
 ka lock
+```
+
+**Unlock admission flags** (both opt-in; never the default):
+
+| Flag | What it does |
+|------|----------------|
+| *(default)* | First unrecognized client gets a y/N prompt on the guard TTY. Approval admits **that connecting process** only. Real OS *descendants* of it are silent later; **siblings** under a shared parent (typical next `ka` from the same shell/IDE) are not — they re-prompt. |
+| `--pre-admit` | Auto-admits the **very next** connecting process for a bounded window (no prompt). Arrival-time grant — whoever connects first. Optional `--pre-admit-secret NAME` scopes it. |
+| `--admit-tree` | At the first unrecognized-peer prompt, pick a kernel-verified **ancestor** as the admission root. Admits that ancestor **and its OS descendants** for the rest of the session. Use this when the connecting client is a short-lived `ka` and you want later sibling invocations under the same parent to stay silent. Does **not** admit processes outside that root's subtree (including siblings *of the root*). Distinct from `--pre-admit` (lineage vs who arrives next). |
+
+```bash
+ka unlock --admit-tree              # choose parent/IDE as root when prompted
+ka unlock --pre-admit               # next client only, no ancestry picker
 ```
 
 Full command reference, project vaults, manifests, roles/export, and admission details: **[the wiki](https://github.com/fujitoid/key-amnesia/wiki)** (`ka docs`).
@@ -113,7 +126,7 @@ Longer honesty notes and policy-vs-crypto labels: [wiki — Threat model](https:
 
 ## Community
 
-Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX) or [GitHub issues](https://github.com/fujitoid/key-amnesia/issues).
+Questions, bugs, and ideas: [Discord](https://discord.gg/4WnQfk49xX), [GitHub Discussions](https://github.com/fujitoid/key-amnesia/discussions), or [GitHub issues](https://github.com/fujitoid/key-amnesia/issues).
 
 ## Support
 

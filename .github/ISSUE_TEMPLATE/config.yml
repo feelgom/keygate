@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discord
+    url: https://discord.gg/4WnQfk49xX
+    about: Questions, ideas, and informal discussion
+  - name: Wiki
+    url: https://github.com/fujitoid/key-amnesia/wiki
+    about: Command reference, admission, threat-model notes (`ka docs`)
