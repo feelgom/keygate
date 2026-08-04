@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -157,6 +158,36 @@ def test_helper_parent_death_cancels(monkeypatch) -> None:
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     rc = run_prompt_helper()
     assert rc != 0
+
+
+def test_parent_alive_unqueryable_is_not_dead(monkeypatch) -> None:
+    """OpenProcess / kill failure must not look like a dead parent."""
+    import sys
+
+    from key_amnesia import prompt_route
+
+    if sys.platform == "win32":
+        import ctypes
+
+        class _FakeKernel:
+            def OpenProcess(self, *a, **k):
+                return 0  # cannot open — unknown, not proven dead
+
+            def GetExitCodeProcess(self, *a, **k):
+                raise AssertionError("should not query without a handle")
+
+            def CloseHandle(self, *a, **k):
+                return True
+
+        monkeypatch.setattr(ctypes.windll, "kernel32", _FakeKernel())
+        assert prompt_route.parent_alive(12345) is True
+    else:
+
+        def _deny(pid, sig):
+            raise PermissionError("simulated")
+
+        monkeypatch.setattr(os, "kill", _deny)
+        assert prompt_route.parent_alive(os.getpid()) is True
 
 
 def test_stdin_tty_stdout_not_routes_spawned(ka_home, monkeypatch) -> None:

@@ -253,6 +253,14 @@ def require_human_auth(
                 conn = item
                 break
             if proc.poll() is not None:
+                # Helper may have connected in the same tick it exited; give
+                # the accept thread a brief grace before concluding silence.
+                t.join(timeout=0.5)
+                if accepted:
+                    item = accepted[0]
+                    if isinstance(item, BaseException):
+                        raise item
+                    conn = item
                 break
         else:
             audit_event(
@@ -277,7 +285,11 @@ def require_human_auth(
             return AuthOutcome(
                 ok=False,
                 route="spawned-console",
-                reason="helper exited without connecting",
+                reason=(
+                    "helper exited without connecting "
+                    "(keep the auth window open until it finishes, "
+                    "or use `ka unlock` then retry)"
+                ),
             )
 
         try:
@@ -357,6 +369,13 @@ def clear_helper_env() -> dict[str, str]:
 
 
 def parent_alive(pid: int) -> bool:
+    """Best-effort check whether *pid* is still a live process.
+
+    Fail-open when the OS will not let us query the process: a false "dead"
+    after the human typed the master password aborts the helper without an
+    IPC reply, and the parent only sees "helper exited without connecting"
+    (common when the parent is an agent harness the helper cannot OpenProcess).
+    """
     if pid <= 0:
         return False
     if sys.platform == "win32":
@@ -368,12 +387,13 @@ def parent_alive(pid: int) -> bool:
             PROCESS_QUERY_LIMITED_INFORMATION, False, pid
         )
         if not handle:
-            return False
+            # Cannot query — unknown, not proven dead.
+            return True
         try:
             exit_code = ctypes.c_ulong()
             ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))  # type: ignore[attr-defined]
             if not ok:
-                return False
+                return True
             return exit_code.value == STILL_ACTIVE
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
@@ -381,8 +401,11 @@ def parent_alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)
             return True
-        except OSError:
+        except ProcessLookupError:
             return False
+        except OSError:
+            # EPERM / other — process may exist but be unsignalable.
+            return True
 
 
 def run_prompt_helper() -> int:
@@ -480,8 +503,10 @@ def run_prompt_helper() -> int:
         password = ""
 
     if cancel["flag"]:
-        theme.error("Cancelled (parent exited).")
-        return 1
+        # Still reply over IPC — silent exit made parents report only
+        # "helper exited without connecting" with no usable reason.
+        reply["reason"] = "cancelled (parent exited)"
+        return _helper_reply_and_exit(address, authkey, reply, cancel)
 
     try:
         if not password:
@@ -647,15 +672,29 @@ def run_prompt_helper() -> int:
                         )
                 else:
                     reply["reason"] = f"unsupported helper action: {action}"
+    except Exception as e:  # noqa: BLE001
+        reply["ok"] = False
+        reply["reason"] = f"helper error: {e}"
     finally:
         # Wipe password from locals as best-effort
         password = ""  # noqa: F841
 
-    # Connect back to parent and send status-only reply.
+    return _helper_reply_and_exit(address, authkey, reply, cancel)
+
+
+def _helper_reply_and_exit(
+    address: str,
+    authkey: bytes,
+    reply: dict[str, Any],
+    cancel: dict[str, bool],
+) -> int:
+    """Connect back to parent with a status-only reply, then exit.
+
+    Always attempts IPC — skipping it left parents with only
+    "helper exited without connecting" and no reason string.
+    """
     try:
-        if parent_pid and not parent_alive(parent_pid):
-            theme.error("Parent gone; discarding reply.")
-            return 1
+        # Do not skip connect on a soft parent_alive miss — try anyway.
         conn = ipc.connect(address, authkey)
         try:
             # Final hard filter: never send password or raw secret maps.
@@ -677,6 +716,7 @@ def run_prompt_helper() -> int:
     except Exception as e:  # noqa: BLE001
         theme.error(f"Failed to reply to parent: {e}")
         input("Press Enter to close...")
+        cancel["flag"] = True
         return 1
 
     cancel["flag"] = True
