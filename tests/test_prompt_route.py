@@ -161,7 +161,7 @@ def test_helper_parent_death_cancels(monkeypatch) -> None:
 
 
 def test_parent_alive_unqueryable_is_not_dead(monkeypatch) -> None:
-    """OpenProcess / kill failure must not look like a dead parent."""
+    """Access-denied OpenProcess / kill must not look like a dead parent."""
     import sys
 
     from key_amnesia import prompt_route
@@ -170,8 +170,15 @@ def test_parent_alive_unqueryable_is_not_dead(monkeypatch) -> None:
         import ctypes
 
         class _FakeKernel:
+            def SetLastError(self, code):
+                self._err = code
+
+            def GetLastError(self):
+                return getattr(self, "_err", 0)
+
             def OpenProcess(self, *a, **k):
-                return 0  # cannot open — unknown, not proven dead
+                self._err = 5  # ERROR_ACCESS_DENIED — may exist
+                return 0
 
             def GetExitCodeProcess(self, *a, **k):
                 raise AssertionError("should not query without a handle")
@@ -188,6 +195,15 @@ def test_parent_alive_unqueryable_is_not_dead(monkeypatch) -> None:
 
         monkeypatch.setattr(os, "kill", _deny)
         assert prompt_route.parent_alive(os.getpid()) is True
+
+
+def test_parent_alive_missing_pid_is_dead() -> None:
+    """A nonexistent pid must be dead (not fail-open)."""
+    from key_amnesia.prompt_route import parent_alive
+
+    # High unused pid — OpenProcess → ERROR_INVALID_PARAMETER (87) on Windows;
+    # ProcessLookupError / ESRCH on POSIX.
+    assert parent_alive(999_999_999) is False
 
 
 def test_stdin_tty_stdout_not_routes_spawned(ka_home, monkeypatch) -> None:

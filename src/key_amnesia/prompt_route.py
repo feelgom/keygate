@@ -369,10 +369,11 @@ def clear_helper_env() -> dict[str, str]:
 def parent_alive(pid: int) -> bool:
     """Best-effort check whether *pid* is still a live process.
 
-    Fail-open when the OS will not let us query the process: a false "dead"
-    after the human typed the master password aborts the helper without an
-    IPC reply, and the parent only sees "helper exited without connecting"
+    Fail-open only when the OS refuses access to a process that may exist
+    (Windows ERROR_ACCESS_DENIED / POSIX EPERM): a false "dead" after the
+    human typed the master password aborts the helper without an IPC reply
     (common when the parent is an agent harness the helper cannot OpenProcess).
+    A missing process (ERROR_INVALID_PARAMETER / ProcessLookupError) is dead.
     """
     if pid <= 0:
         return False
@@ -381,20 +382,22 @@ def parent_alive(pid: int) -> bool:
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         STILL_ACTIVE = 259
-        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-        )
+        ERROR_ACCESS_DENIED = 5
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.SetLastError(0)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            # Cannot query — unknown, not proven dead.
-            return True
+            # Access denied → process may exist; anything else (e.g. 87
+            # ERROR_INVALID_PARAMETER for a missing pid) → dead.
+            return kernel32.GetLastError() == ERROR_ACCESS_DENIED
         try:
             exit_code = ctypes.c_ulong()
-            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))  # type: ignore[attr-defined]
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
             if not ok:
                 return True
             return exit_code.value == STILL_ACTIVE
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+            kernel32.CloseHandle(handle)
     else:
         try:
             os.kill(pid, 0)
