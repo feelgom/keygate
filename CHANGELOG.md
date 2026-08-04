@@ -2,7 +2,14 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.5`.
+Versions follow the git tags `0.4.0` … `0.4.6`.
+
+## [0.4.6] — 2026-08-04
+
+### Fixed
+
+- Spawned-console auth helper: single `Listener.accept` thread (restarting accept each second orphaned the connection → parent closed the pipe → helper `WinError 232`); connect to parent *before* running `ka run` commands; do not abort the wait on flaky `Popen.poll`; `parent_alive` fail-open only on access-denied (not missing PIDs).
+- Helper always attempts an IPC status reply with a reason instead of silent exit (`helper exited without connecting`).
 
 ## [0.4.5] — 2026-08-04
 
@@ -64,6 +71,7 @@ Versions follow the git tags `0.4.0` … `0.4.5`.
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.6]: https://github.com/fujitoid/key-amnesia/compare/0.4.5...0.4.6
 [0.4.5]: https://github.com/fujitoid/key-amnesia/compare/0.4.4...0.4.5
 [0.4.4]: https://github.com/fujitoid/key-amnesia/compare/0.4.3...0.4.4
 [0.4.3]: https://github.com/fujitoid/key-amnesia/compare/0.4.2...0.4.3
