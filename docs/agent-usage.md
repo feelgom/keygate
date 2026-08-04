@@ -43,7 +43,7 @@ There is no MCP “get secret” API. That is intentional.
 ## Cached vs per-call
 
 - **per-call** (default): each privileged use prompts.
-- **cached**: after `ka unlock`, `run` and `list` can proceed without prompts until timeout or `ka lock`. `reveal` / `copy` still always prompt.
+- **cached**: after `ka unlock`, `run` and `list` can proceed without prompts until timeout or `ka lock`. `reveal` / `copy` still always prompt. Operators who want fewer re-prompts for sibling agent invocations can unlock with `--pre-admit` (next connection only) or `--admit-tree` (choose an ancestor as root). Agents never run `unlock`.
 
 ## Related
 

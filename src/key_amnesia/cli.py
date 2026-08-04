@@ -282,6 +282,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "unscoped ALL-secrets pre-admit"
         ),
     )
+    p_unlock.add_argument(
+        "--admit-tree",
+        action="store_true",
+        help=(
+            "Widen admission trust to descendants of a kernel-verified "
+            "ancestor you choose at the first unrecognized-peer prompt"
+        ),
+    )
     _add_vault_scope_args(p_unlock)
     p_lock = sub.add_parser("lock", help="Tear down cached guard session")
     p_lock.add_argument(
@@ -1336,10 +1344,13 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     pre_admit = bool(getattr(args, "pre_admit", False))
     pre_admit_secrets = list(getattr(args, "pre_admit_secret", None) or [])
     pre_admit_seconds = int(cfg.get("pre-admit-seconds", 900))
+    admit_tree = bool(getattr(args, "admit_tree", False))
     detail = f"session timeout: {timeout_min} minutes"
     if pre_admit:
         scope = ", ".join(pre_admit_secrets) if pre_admit_secrets else "ALL secrets"
         detail += f"; --pre-admit armed for {scope} ({pre_admit_seconds}s window)"
+    if admit_tree:
+        detail += "; --admit-tree (choose ancestor as admission root)"
     request = PromptRequest(
         action="unlock",
         detail=detail,
@@ -1404,6 +1415,7 @@ def cmd_unlock(args: argparse.Namespace) -> int:
             pre_admit=pre_admit,
             pre_admit_secrets=pre_admit_secrets,
             pre_admit_seconds=pre_admit_seconds,
+            admit_tree=admit_tree,
         )
 
     theme.error(f"Denied: {outcome.reason or 'unlock failed'}")
