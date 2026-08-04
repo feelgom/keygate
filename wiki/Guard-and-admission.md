@@ -60,6 +60,20 @@ consumed by the first peer to connect. This trades consent-before for
 audit-after for one bounded tree; use it only right before the command
 you expect.
 
+## Admit-tree
+
+```bash
+ka unlock --admit-tree
+```
+
+Opt-in, session-only (no config/env). At the first unrecognized-peer
+prompt, offers numbered kernel-verified ancestors so you can admit a
+*parent* (or other ancestor) as the root — every real OS descendant of
+that root is then silently in-tree. Fixes the empty-tree case when the
+connecting peer is a short-lived `ka`. Distinct audit `via=interactive-tree`.
+Does **not** change `--pre-admit` (arrival-time vs lineage). Agents never
+run `unlock`; only the human enables this when lineage trust is intended.
+
 ## Platform honesty
 
 - **Linux:** `SO_PEERCRED` at accept (kernel-verified pid/uid/gid). Kernel

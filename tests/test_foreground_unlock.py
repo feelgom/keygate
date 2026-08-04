@@ -108,6 +108,32 @@ def test_cmd_unlock_no_pre_admit_by_default(
     assert rc == 0
     assert calls["kwargs"]["pre_admit"] is False
     assert calls["kwargs"]["pre_admit_secrets"] == []
+    assert calls["kwargs"]["admit_tree"] is False
+
+
+def test_cmd_unlock_admit_tree_flag_threads_through(
+    seeded_vault, password, monkeypatch
+) -> None:
+    """`--admit-tree` reaches `run_foreground_guard` (off by default)."""
+    monkeypatch.setattr(
+        "key_amnesia.cli.require_human_auth",
+        lambda *a, **k: AuthOutcome(ok=True, route="inline", password=password),
+    )
+    monkeypatch.setattr("key_amnesia.guard.guard_is_alive", lambda *a, **k: False)
+
+    calls: dict = {}
+
+    def fake_run_foreground_guard(payload, timeout_minutes, **kwargs):
+        calls["kwargs"] = kwargs
+        return 0
+
+    monkeypatch.setattr(
+        "key_amnesia.guard.run_foreground_guard", fake_run_foreground_guard
+    )
+
+    rc = main(["unlock", "--admit-tree"])
+    assert rc == 0
+    assert calls["kwargs"]["admit_tree"] is True
 
 
 def test_cmd_unlock_already_active_soft_warns(

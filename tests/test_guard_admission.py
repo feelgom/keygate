@@ -21,6 +21,8 @@ from __future__ import annotations
 import sys
 import time
 
+import pytest
+
 from key_amnesia.guard import (
     AdmittedSession,
     GuardState,
@@ -343,3 +345,307 @@ def test_status_reports_pre_admit_pending(ka_home) -> None:
     assert reply["ok"] is True
     assert reply["pre_admit_pending"] is True
     assert reply["pre_admit_scope"] == "ALL (unscoped pre-admit)"
+
+
+# --- `--admit-tree` (0.4.5) -------------------------------------------------
+
+PARENT = PeerIdentity(pid=100, start_time=10)
+GRANDPARENT = PeerIdentity(pid=50, start_time=5)
+GREAT_GP = PeerIdentity(pid=40, start_time=4)
+# Chain long enough that PARENT is not floored (ANCESTOR_FLOOR_TAIL=2).
+_TREE_CHAIN = [PEER, PARENT, GRANDPARENT, GREAT_GP]
+
+
+def _enable_admit_tree_mocks(monkeypatch, chain_for_pid=None) -> None:
+    """Ownability / image / hold stubs so fake pids are offerable in tests."""
+    chains = chain_for_pid or {}
+
+    def fake_chain(pid, max_depth=32):
+        if pid in chains:
+            return list(chains[pid])
+        return list(_TREE_CHAIN)
+
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_ancestor_chain", fake_chain
+    )
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.ancestor_owned_by_self", lambda _ident: True
+    )
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_process_image_name",
+        lambda pid: f"img-{pid}",
+    )
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.hold_identity",
+        lambda ident: ident,
+    )
+
+
+def test_admit_tree_flag_off_sibling_still_prompts(ka_home, monkeypatch) -> None:
+    """Default (flag off): sibling of an admitted peer still gets y/N."""
+    state = _state()  # admit_tree defaults False
+    state.admitted = _admitted(PEER)
+    sibling = PeerIdentity(pid=7777, start_time=4000)
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_ancestor_chain",
+        lambda pid, max_depth=32: [sibling, PARENT, GRANDPARENT, GREAT_GP],
+    )
+    calls = {"n": 0}
+
+    def approve(*_a, **_k):
+        calls["n"] += 1
+        return True
+
+    reply = guard_handle_message(
+        {"verb": "list"}, state, peer=sibling, admit_prompt=approve
+    )
+    assert reply["ok"] is True
+    assert calls["n"] == 1
+    assert state.admitted.identities == [sibling]
+
+
+def test_admit_tree_parent_root_admits_sibling_silently(ka_home, monkeypatch) -> None:
+    """Flag on + human picks parent → sibling sharing that parent is in-tree."""
+    _enable_admit_tree_mocks(
+        monkeypatch,
+        chain_for_pid={
+            PEER.pid: _TREE_CHAIN,
+            OTHER_PEER.pid: [OTHER_PEER, PARENT, GRANDPARENT, GREAT_GP],
+        },
+    )
+    state = _state(admit_tree=True)
+    # Parent is offerable index 2 (after connecting peer).
+    state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+
+    def fail_if_y_n(*_a, **_k):
+        raise AssertionError("admit_tree path must not use default y/N prompt")
+
+    reply = guard_handle_message(
+        {"verb": "list"}, state, peer=PEER, admit_prompt=fail_if_y_n
+    )
+    assert reply["ok"] is True
+    assert state.admitted is not None
+    assert state.admitted.identities == [PARENT]
+    assert state.admitted.unscoped is False
+
+    def fail_if_called(*_a, **_k):
+        raise AssertionError("sibling under admitted parent must not reprompt")
+
+    reply2 = guard_handle_message(
+        {"verb": "list"},
+        state,
+        peer=OTHER_PEER,
+        admit_prompt=fail_if_called,
+    )
+    assert reply2["ok"] is True
+
+
+def test_admit_tree_message_cannot_supply_root_pid(ka_home, monkeypatch) -> None:
+    """Forged message fields are ignored — root comes only from the chain."""
+    _enable_admit_tree_mocks(monkeypatch)
+    state = _state(admit_tree=True)
+    state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+    forged = PeerIdentity(pid=99999, start_time=1)
+
+    reply = guard_handle_message(
+        {
+            "verb": "list",
+            "root_pid": forged.pid,
+            "admit_root_pid": forged.pid,
+            "claimed_root": forged.pid,
+        },
+        state,
+        peer=PEER,
+        admit_prompt=lambda *_a, **_k: False,
+    )
+    assert reply["ok"] is True
+    assert state.admitted is not None
+    assert state.admitted.identities == [PARENT]
+    assert forged not in state.admitted.identities
+
+
+def test_admit_tree_non_chain_identity_never_stored(ka_home, monkeypatch) -> None:
+    """Typing a raw pid (not a menu index) denies — never stores that pid."""
+    _enable_admit_tree_mocks(monkeypatch)
+    state = _state(admit_tree=True)
+    # PARENT.pid happens to be 100 — out of range for [1..k] menu.
+    state.stdin_pump.read_line = lambda _timeout: str(PARENT.pid)  # type: ignore[method-assign]
+
+    reply = guard_handle_message(
+        {"verb": "list"},
+        state,
+        peer=PEER,
+        admit_prompt=lambda *_a, **_k: True,  # must not fall through
+    )
+    assert reply["ok"] is False
+    assert state.admitted is None
+
+
+def test_admit_tree_same_pid_different_start_time_not_in_tree(
+    ka_home, monkeypatch
+) -> None:
+    """Recycled pid (same number, different start_time) is not in-tree."""
+    _enable_admit_tree_mocks(
+        monkeypatch,
+        chain_for_pid={PEER.pid: _TREE_CHAIN},
+    )
+    state = _state(admit_tree=True)
+    state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
+    assert reply["ok"] is True
+    assert state.admitted.identities == [PARENT]
+
+    recycled = PeerIdentity(pid=PARENT.pid, start_time=PARENT.start_time + 999)
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_ancestor_chain",
+        lambda pid, max_depth=32: [recycled],
+    )
+    calls = {"n": 0}
+
+    def approve(*_a, **_k):
+        calls["n"] += 1
+        return True
+
+    # admit_tree still on, but recycled's chain is short → normal y/N.
+    reply2 = guard_handle_message(
+        {"verb": "list"}, state, peer=recycled, admit_prompt=approve
+    )
+    assert reply2["ok"] is True
+    assert calls["n"] == 1
+    assert state.admitted.identities == [recycled]
+
+
+def test_admit_tree_depth_floor_levels_unavailable(ka_home, monkeypatch, capsys) -> None:
+    """Last ANCESTOR_FLOOR_TAIL chain entries are listed as skipped, not offered."""
+    from key_amnesia.peer_identity import ANCESTOR_FLOOR_TAIL, classify_admit_tree_levels
+
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.ancestor_owned_by_self", lambda _ident: True
+    )
+    offerable, skipped = classify_admit_tree_levels(_TREE_CHAIN)
+    assert PARENT in offerable
+    floored_pids = {n.pid for n, _r in skipped}
+    assert GRANDPARENT.pid in floored_pids
+    assert GREAT_GP.pid in floored_pids
+    assert len([r for _n, r in skipped if "depth floor" in r]) == ANCESTOR_FLOOR_TAIL
+
+    _enable_admit_tree_mocks(monkeypatch)
+    state = _state(admit_tree=True)
+    state.stdin_pump.read_line = lambda _timeout: "1"  # type: ignore[method-assign]
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
+    assert reply["ok"] is True
+    out = capsys.readouterr().out
+    assert "skipped" in out
+    assert "depth floor" in out
+    # Choosing [1] admits connecting peer, never a floored ancestor.
+    assert state.admitted.identities == [PEER]
+
+
+def test_admit_tree_audit_via_interactive_tree(ka_home, monkeypatch) -> None:
+    from key_amnesia.paths import audit_log_path
+
+    _enable_admit_tree_mocks(monkeypatch)
+    state = _state(admit_tree=True)
+    state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
+    assert reply["ok"] is True
+    text = audit_log_path().read_text(encoding="utf-8")
+    assert "via=interactive-tree" in text
+    assert f"pid={PARENT.pid}" in text
+
+
+def test_admit_tree_empty_or_short_chain_uses_normal_prompt(
+    ka_home, monkeypatch
+) -> None:
+    """Empty / single-entry chain with admit_tree still uses default y/N."""
+    state = _state(admit_tree=True)
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_ancestor_chain",
+        lambda pid, max_depth=32: [PEER],
+    )
+    calls = {"n": 0}
+
+    def approve(*_a, **_k):
+        calls["n"] += 1
+        return True
+
+    reply = guard_handle_message(
+        {"verb": "list"}, state, peer=PEER, admit_prompt=approve
+    )
+    assert reply["ok"] is True
+    assert calls["n"] == 1
+    assert state.admitted.identities == [PEER]
+
+    state2 = _state(admit_tree=True)
+    monkeypatch.setattr(
+        "key_amnesia.peer_identity.get_ancestor_chain",
+        lambda pid, max_depth=32: [],
+    )
+    calls["n"] = 0
+    reply2 = guard_handle_message(
+        {"verb": "list"}, state2, peer=OTHER_PEER, admit_prompt=approve
+    )
+    assert reply2["ok"] is True
+    assert calls["n"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="OpenProcess hold is Windows-only")
+def test_admit_tree_windows_holds_root_handle_and_releases_on_replace(
+    ka_home, monkeypatch
+) -> None:
+    """Chosen ancestor root gets hold_identity; replace releases prior handle."""
+    import os
+
+    from key_amnesia.guard import _admit_peer
+    from key_amnesia.peer_identity import _win_identity_for_pid
+
+    parent_held = _win_identity_for_pid(os.getpid(), hold=True)
+    try:
+        peer = PeerIdentity(pid=4242, start_time=1000)
+        gp = PeerIdentity(pid=50, start_time=5)
+        ggp = PeerIdentity(pid=40, start_time=4)
+        # Bare (no handle) copy used in the chain / offerable list.
+        parent_bare = PeerIdentity(
+            pid=parent_held.pid, start_time=parent_held.start_time
+        )
+        chain = [peer, parent_bare, gp, ggp]
+
+        monkeypatch.setattr(
+            "key_amnesia.peer_identity.get_ancestor_chain",
+            lambda pid, max_depth=32: list(chain),
+        )
+        monkeypatch.setattr(
+            "key_amnesia.peer_identity.ancestor_owned_by_self",
+            lambda _ident: True,
+        )
+        monkeypatch.setattr(
+            "key_amnesia.peer_identity.get_process_image_name",
+            lambda pid: f"img-{pid}",
+        )
+        monkeypatch.setattr(
+            "key_amnesia.peer_identity.hold_identity",
+            lambda ident: parent_held if ident.matches(parent_held) else ident,
+        )
+
+        state = _state(admit_tree=True)
+        state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+        reply = guard_handle_message({"verb": "list"}, state, peer=peer)
+        assert reply["ok"] is True
+        root = state.admitted.identities[0]
+        assert root is parent_held
+        assert root.process_handle is not None
+        assert root.process_handle._closed is False
+
+        prior_handle = root.process_handle
+        replacement = PeerIdentity(pid=9999, start_time=2000)
+        _admit_peer(
+            state,
+            replacement,
+            granted_secrets=set(),
+            unscoped=False,
+            summary="list",
+            via="interactive",
+        )
+        assert prior_handle._closed is True
+    finally:
+        parent_held.release()

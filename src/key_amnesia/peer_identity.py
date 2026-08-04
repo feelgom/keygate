@@ -43,10 +43,21 @@ from multiprocessing.connection import Connection
 # parent chain from spinning forever.
 MAX_ANCESTOR_DEPTH = 32
 
+# `--admit-tree` offer limits (see DESIGN.md "Process-tree ancestry admission").
+MAX_OFFERED_ANCESTORS = 8
+ANCESTOR_FLOOR_TAIL = 2
+
 
 class PeerIdentityError(Exception):
     """Kernel peer-identity lookup failed — callers must treat this as an
     unrecognized peer, never fall back to a message-supplied pid."""
+
+
+def platform_min_pid() -> int:
+    """Refuse admitting roots at or below this pid (session/init/System)."""
+    if sys.platform == "win32":
+        return 4  # System
+    return 1  # init
 
 
 @dataclass
@@ -374,3 +385,152 @@ def is_in_admitted_tree(admitted: list[PeerIdentity], peer: PeerIdentity) -> boo
         if (node.pid, node.start_time) in admitted_set:
             return True
     return False
+
+
+def get_process_image_name(pid: int) -> str | None:
+    """Best-effort executable basename for *pid*, or None if unreadable."""
+    try:
+        if sys.platform == "win32":
+            return _win_process_image_name(pid)
+        if sys.platform.startswith("linux"):
+            return _linux_process_image_name(pid)
+    except (OSError, ValueError, PeerIdentityError):
+        return None
+    return None
+
+
+def hold_identity(ident: PeerIdentity) -> PeerIdentity:
+    """Ensure *ident* holds a Windows OpenProcess pin for admission lifetime.
+
+    If a handle is already held, return *ident* unchanged. Otherwise reopen
+    via `_win_identity_for_pid(..., hold=True)` and require the creation
+    time still matches (pid-reuse guard). Non-Windows: return unchanged.
+    """
+    if sys.platform != "win32":
+        return ident
+    if ident.process_handle is not None and not ident.process_handle._closed:
+        return ident
+    held = _win_identity_for_pid(ident.pid, hold=True)
+    if held.start_time != ident.start_time:
+        held.release()
+        raise PeerIdentityError(
+            f"pid {ident.pid} start_time changed while opening hold handle "
+            f"(possible recycle)"
+        )
+    return held
+
+
+def ancestor_owned_by_self(ident: PeerIdentity) -> bool:
+    """True if *ident* is owned by this process's effective user.
+
+    Linux: `/proc/<pid>/status` Uid vs `geteuid()`. Windows: successful
+    `OpenProcess(QUERY_LIMITED)` is treated as same-user visibility; failure
+    refuses the level (fail closed).
+    """
+    try:
+        if sys.platform.startswith("linux"):
+            return _linux_owned_by_self(ident.pid)
+        if sys.platform == "win32":
+            return _win_owned_by_self(ident.pid)
+    except (OSError, ValueError, PeerIdentityError):
+        return False
+    return False
+
+
+def classify_admit_tree_levels(
+    chain: list[PeerIdentity],
+) -> tuple[list[PeerIdentity], list[tuple[PeerIdentity, str]]]:
+    """Split *chain* into (offerable, skipped_with_reason) for `--admit-tree`.
+
+    Never offers the last `ANCESTOR_FLOOR_TAIL` entries of the full chain
+    (except the connecting peer at index 0 is never floored out), nor pids
+    at or below `platform_min_pid()`, nor foreign-owned processes. Caps the
+    offer list at `MAX_OFFERED_ANCESTORS`.
+    """
+    offerable: list[PeerIdentity] = []
+    skipped: list[tuple[PeerIdentity, str]] = []
+    min_pid = platform_min_pid()
+    floor_cut = len(chain) - ANCESTOR_FLOOR_TAIL
+    for i, node in enumerate(chain):
+        if i >= floor_cut and i > 0:
+            skipped.append(
+                (node, "too close to session/init (depth floor)"),
+            )
+            continue
+        if node.pid <= min_pid:
+            skipped.append((node, f"pid <= {min_pid} (platform minimum)"))
+            continue
+        if not ancestor_owned_by_self(node):
+            skipped.append((node, "not owned by this user"))
+            continue
+        if len(offerable) >= MAX_OFFERED_ANCESTORS:
+            skipped.append((node, "beyond max offered ancestors"))
+            continue
+        offerable.append(node)
+    return offerable, skipped
+
+
+def _win_process_image_name(pid: int) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+        _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    if not handle:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        # QueryFullProcessImageNameW — kernel32 on Vista+
+        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(  # type: ignore[attr-defined]
+            ctypes.c_void_p(handle), 0, buf, ctypes.byref(size)
+        )
+        if not ok:
+            return None
+        path = buf.value or ""
+        if not path:
+            return None
+        return path.rsplit("\\", 1)[-1] or path
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+
+
+def _linux_process_image_name(pid: int) -> str | None:
+    try:
+        target = os.readlink(f"/proc/{pid}/exe")
+        if target:
+            return target.rsplit("/", 1)[-1] or target
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
+            name = f.read().strip()
+            return name or None
+    except OSError:
+        return None
+
+
+def _linux_owned_by_self(pid: int) -> bool:
+    with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("Uid:"):
+                parts = line.split()
+                # real, effective, saved, fs
+                if len(parts) < 3:
+                    return False
+                return int(parts[2]) == os.geteuid()
+    return False
+
+
+def _win_owned_by_self(pid: int) -> bool:
+    """Best-effort: OpenProcess QUERY_LIMITED succeeding ⇒ treat as same-user."""
+    import ctypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+        _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+    )
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+    return True

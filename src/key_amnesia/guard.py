@@ -160,6 +160,11 @@ class GuardState:
     pre_admit_until: float | None = None
     pre_admit_unscoped: bool = False
     pre_admit_secrets: set[str] = field(default_factory=set)
+    # Opt-in session-only `--admit-tree` (never config/env). When True, an
+    # unrecognized peer with a walkable ancestor chain is offered a numbered
+    # kernel-verified ancestor as admission root instead of the default y/N.
+    # See `_admit_tree_prompt` / DESIGN.md "Process-tree ancestry admission".
+    admit_tree: bool = False
 
 
 def _utc_iso(ts: float | None = None) -> str:
@@ -447,6 +452,25 @@ def _announce_admission(peer: PeerIdentity, session: "AdmittedSession", *, via: 
     """Loud TTY line + a distinct audit event for every new admission grant
     (initial or scope-expanded), pre-admit or interactive alike."""
     scope = _describe_scope(session)
+    if via == "interactive-tree":
+        image = peer_identity.get_process_image_name(peer.pid) or "?"
+        try:
+            theme.success(
+                f"Admitted process TREE rooted at pid {peer.pid} ({image}) — "
+                f"every process it spawns is now admitted, scope: {scope}."
+            )
+        except Exception:
+            pass
+        audit_event(
+            "admission",
+            route="guard-session",
+            result="allowed",
+            reason=(
+                f"via={via} pid={peer.pid} start_time={peer.start_time} "
+                f"image={image} scope={scope}"
+            ),
+        )
+        return
     try:
         theme.success(f"Admitted client (pid {peer.pid}, {via}) — scope: {scope}.")
     except Exception:
@@ -482,14 +506,15 @@ def _admit_peer(
 ) -> None:
     """Create (or replace) `state.admitted` for a newly-approved peer.
 
-    Admission binds to the connecting peer's own kernel-verified identity
-    only — not a hop up to its parent — so a genuine OS descendant of this
-    exact process is silently in-tree (see `peer_identity.is_in_admitted_tree`)
-    while a merely-sibling process (e.g. the next separate CLI invocation
-    from the same shell) is treated as a fresh, unrecognized peer. This is
-    a deliberate trade-off for a bearer-token-free design — see
-    DESIGN.md "Process-tree ancestry admission" — `--pre-admit` exists to
-    smooth over a bounded window of expected repeat activity.
+    By default admission binds to the connecting peer's own kernel-verified
+    identity — not a hop up to its parent — so a genuine OS descendant of
+    this exact process is silently in-tree (see
+    `peer_identity.is_in_admitted_tree`) while a merely-sibling process
+    (e.g. the next separate CLI invocation from the same shell) is treated
+    as a fresh, unrecognized peer. Opt-in `--admit-tree` may instead store
+    a kernel-verified *ancestor* as the root (`via=interactive-tree`);
+    `--pre-admit` remains the separate single-use arrival-time grant.
+    See DESIGN.md "Process-tree ancestry admission".
 
     Replacing an existing admission releases any OpenProcess handle held
     on the previous root (Windows).
@@ -505,6 +530,63 @@ def _admit_peer(
         unscoped=unscoped,
     )
     _announce_admission(peer, state.admitted, via=via)
+
+
+def _admit_tree_prompt(
+    peer: PeerIdentity,
+    msg: dict[str, Any],
+    verb: str,
+    chain: list[PeerIdentity],
+    state: GuardState,
+) -> PeerIdentity | None:
+    """Numbered ancestor picker for `ka unlock --admit-tree`.
+
+    Offers only identities from *chain* after `classify_admit_tree_levels`
+    (never message fields — a forged `root_pid` / similar is ignored).
+    Returns the chosen `PeerIdentity` from the offerable list, or None on
+    deny / timeout / empty / garbage input.
+    """
+    offerable, skipped = peer_identity.classify_admit_tree_levels(chain)
+    summary = _summarize_request(verb, msg)
+    client_name = str(msg.get("client_name") or "")
+    label = f"pid {peer.pid}, verified"
+    if client_name:
+        label = f"{client_name} ({label})"
+    try:
+        theme.out(f"Session ({label}) wants: {summary}. Admit process tree?")
+        if not offerable:
+            theme.out("  (no offerable ancestors)")
+        for i, node in enumerate(offerable, start=1):
+            image = peer_identity.get_process_image_name(node.pid) or "?"
+            theme.out(f"  [{i}] pid {node.pid}  {image}")
+        for node, reason in skipped:
+            theme.out(f"  (skipped: pid {node.pid} — {reason})")
+        if offerable:
+            theme.out(
+                f"Choose root [1-{len(offerable)}], or n to deny: ",
+                end="",
+            )
+        else:
+            theme.out("Deny [n]: ", end="")
+    except Exception:
+        pass
+
+    if not offerable:
+        return None
+
+    line = state.stdin_pump.read_line(ADMISSION_TIMEOUT_S)
+    if line is None:
+        return None
+    answer = line.strip().lower()
+    if answer in ("", "n", "no"):
+        return None
+    try:
+        idx = int(answer)
+    except ValueError:
+        return None
+    if idx < 1 or idx > len(offerable):
+        return None
+    return offerable[idx - 1]
 
 
 def _check_admission(
@@ -602,6 +684,33 @@ def _check_admission(
         result="warn",
         reason=f"unrecognized peer pid={peer.pid} wants: {summary}",
     )
+    # Opt-in `--admit-tree`: offer a kernel-verified ancestor as admission
+    # root when the chain is long enough to walk. Empty/short chains and
+    # flag-off keep the default y/N prompt byte-identical.
+    if state.admit_tree:
+        chain = peer_identity.get_ancestor_chain(peer.pid)
+        if len(chain) >= 2:
+            chosen = _admit_tree_prompt(peer, msg, verb, chain, state)
+            if chosen is None:
+                return False, None
+            # Never trust message fields for the root — only chain/offerable.
+            # Prefer the connecting peer object when it matches (held handle).
+            if chosen.matches(peer):
+                root = peer
+            else:
+                try:
+                    root = peer_identity.hold_identity(chosen)
+                except peer_identity.PeerIdentityError:
+                    return False, None
+            _admit_peer(
+                state,
+                root,
+                granted_secrets=requested,
+                unscoped=False,
+                summary=summary,
+                via="interactive-tree",
+            )
+            return True, None
     if not _prompt(peer):
         return False, None
     _admit_peer(state, peer, granted_secrets=requested, unscoped=False, summary=summary, via="interactive")
@@ -1222,6 +1331,7 @@ def run_foreground_guard(
     pre_admit: bool = False,
     pre_admit_secrets: list[str] | None = None,
     pre_admit_seconds: int = 900,
+    admit_tree: bool = False,
 ) -> int:
     """`ka unlock`'s foreground body: build state, serve, block until done.
 
@@ -1251,6 +1361,12 @@ def run_foreground_guard(
     `pre_admit_secrets` if given, else unscoped ALL secrets. Must be loud:
     printed here immediately, plus a distinct audit event, *and* announced
     again at the moment it's actually consumed (see `_check_admission`).
+
+    `admit_tree` (opt-in, never the default, no config/env) widens the
+    interactive admission prompt so a human can pick a kernel-verified
+    ancestor as the admission root — every real OS descendant of that root
+    is then silently in-tree for the rest of the session. Distinct from
+    `--pre-admit` (arrival-time grant vs lineage root).
     """
     secrets_map = {k: str(v) for k, v in payload.get("secrets", {}).items()}
     expires_at = time.time() + timeout_minutes * 60
@@ -1284,6 +1400,7 @@ def run_foreground_guard(
         vault_key=vkey,
         vault_content_fingerprint=fingerprint,
         vault_sources=sources,
+        admit_tree=bool(admit_tree),
     )
     if pre_admit:
         scoped_names = set(pre_admit_secrets or ())

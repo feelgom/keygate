@@ -3,7 +3,7 @@
 These markdown files are **first drafts** for the live GitHub wiki at
 [https://github.com/fujitoid/key-amnesia/wiki](https://github.com/fujitoid/key-amnesia/wiki).
 
-**Docs as of 0.4.4** — in-repo wording targets that release. Live wiki last
+**Docs as of 0.4.5** — in-repo wording targets that release. Live wiki last
 published for 0.4.4.
 
 

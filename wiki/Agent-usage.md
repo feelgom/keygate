@@ -52,6 +52,7 @@ never ask them to paste the result back into chat:
 |---------|-----|
 | `ka init` | TTY-only; double-confirmed master password |
 | `ka unlock` / `ka lock` | Human starts/ends a cached session |
+| `ka unlock --admit-tree` | Human-only: widen admission to a chosen ancestor's descendants |
 | `ka passwd` | TTY-only password change |
 | `ka set NAME` | Stores a value; prefer hidden prompt over inline argv |
 | `ka import FILE` | TTY-only; interactive confirms |

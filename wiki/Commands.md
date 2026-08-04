@@ -14,7 +14,7 @@ notes live in the repository `DESIGN.md`.
 | `ka scan [--deep] [--include-excluded] [--json] [--yes] [--no-import]` | LEAK report (names/paths/counts only); optional offer-to-import |
 | `ka run --secret NAME [--as NAME=ENVVAR] -- <cmd>` | Inject + scrub; agent-facing path (`=` form required for `--as`) |
 | `ka list` | Names only; safe for agents; no prompt |
-| `ka unlock [--pre-admit] [--pre-admit-secret NAME]` | Start cached guard session (pre-admit flags opt-in) |
+| `ka unlock [--pre-admit] [--pre-admit-secret NAME] [--admit-tree]` | Start cached guard session (pre-admit / admit-tree flags opt-in) |
 | `ka lock` | End session early |
 | `ka reveal NAME` / `ka copy NAME` | Human-only surface of a value; always fresh auth |
 | `ka config show` / `ka config set KEY VALUE` | Settings |
@@ -53,6 +53,9 @@ ka run --secret API_KEY -- python my_script.py
 - `--pre-admit` — loudly pre-admit the next client for a bounded window
 - `--pre-admit-secret NAME` — scope that window (repeatable); omit for
   unscoped ALL-secrets pre-admit
+- `--admit-tree` — at the first unrecognized-peer prompt, choose a
+  kernel-verified ancestor as the admission root (widens trust to its
+  descendants); session-only, off by default
 
 Vault-aware commands also accept `--vault PATH`, `--global`, `--no-global`,
 `--env NAME`. Guard-talking commands accept display-only `--name LABEL`.
