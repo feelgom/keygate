@@ -541,6 +541,22 @@ def test_admit_tree_depth_floor_levels_unavailable(ka_home, monkeypatch, capsys)
     assert state.admitted.identities == [PEER]
 
 
+def test_admit_tree_prompt_labels_depth_narrow_to_wide(
+    ka_home, monkeypatch, capsys
+) -> None:
+    """Menu labels show leaf→ancestor so the human can pick trust width."""
+    _enable_admit_tree_mocks(monkeypatch)
+    state = _state(admit_tree=True)
+    state.stdin_pump.read_line = lambda _timeout: "2"  # type: ignore[method-assign]
+    reply = guard_handle_message({"verb": "list"}, state, peer=PEER)
+    assert reply["ok"] is True
+    out = capsys.readouterr().out
+    assert "narrower trust" in out or "narrow" in out
+    assert "this client (narrowest)" in out
+    assert "parent" in out
+    assert "Choose root" in out
+
+
 def test_admit_tree_audit_via_interactive_tree(ka_home, monkeypatch) -> None:
     from key_amnesia.paths import audit_log_path
 
