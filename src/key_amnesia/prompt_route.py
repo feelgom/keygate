@@ -229,31 +229,32 @@ def require_human_auth(
             )
             return AuthOutcome(ok=False, route="spawned-console", reason=str(e))
 
-        # Wait for helper to connect and reply.
+        # Wait for helper to connect. One accept thread for the whole wait —
+        # restarting accept each second orphaned connections on older threads
+        # (parent never saw them; later closed the listener → helper WinError 232).
         deadline = time.monotonic() + timeout_s
         conn: Connection | None = None
+        accepted: list[Connection | BaseException] = []
+
+        def _accept() -> None:
+            try:
+                accepted.append(listener.accept())
+            except BaseException as exc:  # noqa: BLE001
+                accepted.append(exc)
+
+        accept_thread = threading.Thread(target=_accept, daemon=True)
+        accept_thread.start()
         while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            # Listener.accept has no timeout on all platforms; use a thread.
-            accepted: list[Connection | BaseException] = []
-
-            def _accept() -> None:
-                try:
-                    accepted.append(listener.accept())
-                except BaseException as exc:  # noqa: BLE001
-                    accepted.append(exc)
-
-            t = threading.Thread(target=_accept, daemon=True)
-            t.start()
-            t.join(timeout=min(1.0, max(0.1, remaining)))
+            accept_thread.join(timeout=0.5)
             if accepted:
                 item = accepted[0]
                 if isinstance(item, BaseException):
                     raise item
                 conn = item
                 break
-            if proc.poll() is not None:
-                break
+            # Do not abort on proc.poll(): WindowsApps/store Python + 
+            # CREATE_NEW_CONSOLE can make the tracked Popen exit while the
+            # real helper console is still alive (password prompt / run).
         else:
             audit_event(
                 request.action,
@@ -277,12 +278,21 @@ def require_human_auth(
             return AuthOutcome(
                 ok=False,
                 route="spawned-console",
-                reason="helper exited without connecting",
+                reason=(
+                    "helper exited without connecting "
+                    "(keep the auth window open until it finishes, "
+                    "or use `ka unlock` then retry)"
+                ),
             )
 
         try:
+            # After connect (post-password), `run` may take far longer than the
+            # prompt window — mirror guard_request's generous bound.
             remaining = max(0.1, deadline - time.monotonic())
-            reply = ipc.recv_msg(conn, timeout=remaining)
+            recv_timeout = remaining
+            if request.action == "run":
+                recv_timeout = max(remaining, 3600.0)
+            reply = ipc.recv_msg(conn, timeout=recv_timeout)
         except TimeoutError:
             audit_event(
                 request.action,
@@ -357,6 +367,14 @@ def clear_helper_env() -> dict[str, str]:
 
 
 def parent_alive(pid: int) -> bool:
+    """Best-effort check whether *pid* is still a live process.
+
+    Fail-open only when the OS refuses access to a process that may exist
+    (Windows ERROR_ACCESS_DENIED / POSIX EPERM): a false "dead" after the
+    human typed the master password aborts the helper without an IPC reply
+    (common when the parent is an agent harness the helper cannot OpenProcess).
+    A missing process (ERROR_INVALID_PARAMETER / ProcessLookupError) is dead.
+    """
     if pid <= 0:
         return False
     if sys.platform == "win32":
@@ -364,25 +382,31 @@ def parent_alive(pid: int) -> bool:
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         STILL_ACTIVE = 259
-        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-        )
+        ERROR_ACCESS_DENIED = 5
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.SetLastError(0)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            return False
+            # Access denied → process may exist; anything else (e.g. 87
+            # ERROR_INVALID_PARAMETER for a missing pid) → dead.
+            return kernel32.GetLastError() == ERROR_ACCESS_DENIED
         try:
             exit_code = ctypes.c_ulong()
-            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))  # type: ignore[attr-defined]
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
             if not ok:
-                return False
+                return True
             return exit_code.value == STILL_ACTIVE
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+            kernel32.CloseHandle(handle)
     else:
         try:
             os.kill(pid, 0)
             return True
-        except OSError:
+        except ProcessLookupError:
             return False
+        except OSError:
+            # EPERM / other — process may exist but be unsignalable.
+            return True
 
 
 def run_prompt_helper() -> int:
@@ -395,7 +419,6 @@ def run_prompt_helper() -> int:
     from pathlib import Path
 
     from key_amnesia.clipboard import copy_to_clipboard
-    from key_amnesia.run_exec import run_with_secrets
     from key_amnesia.vault import VaultError, load_vault
 
     env = clear_helper_env()
@@ -480,8 +503,10 @@ def run_prompt_helper() -> int:
         password = ""
 
     if cancel["flag"]:
-        theme.error("Cancelled (parent exited).")
-        return 1
+        # Still reply over IPC — silent exit made parents report only
+        # "helper exited without connecting" with no usable reason.
+        reply["reason"] = "cancelled (parent exited)"
+        return _helper_reply_and_exit(address, authkey, reply, cancel)
 
     try:
         if not password:
@@ -525,16 +550,18 @@ def run_prompt_helper() -> int:
                             for n in request.secret_names
                         }
                         by_name = {n: secrets_map[n] for n in request.secret_names}
-                        result = run_with_secrets(
-                            request.command, env_inject, by_name
+                        # Connect *before* running so the parent holds the pipe
+                        # for the whole command. Late connect after a long run
+                        # hit WinError 232 when the parent had already closed.
+                        password = ""  # noqa: F841 — wipe before child work
+                        return _helper_run_connected(
+                            address,
+                            authkey,
+                            cancel,
+                            request.command,
+                            env_inject,
+                            by_name,
                         )
-                        reply["ok"] = True
-                        reply["run_result"] = {
-                            "exit_code": result.exit_code,
-                            "scrubbed_stdout": result.scrubbed_stdout,
-                            "scrubbed_stderr": result.scrubbed_stderr,
-                        }
-                        # Never include raw secrets in reply.
 
                 elif action == "reveal":
                     name = request.secret_names[0] if request.secret_names else ""
@@ -647,15 +674,94 @@ def run_prompt_helper() -> int:
                         )
                 else:
                     reply["reason"] = f"unsupported helper action: {action}"
+    except Exception as e:  # noqa: BLE001
+        reply["ok"] = False
+        reply["reason"] = f"helper error: {e}"
     finally:
         # Wipe password from locals as best-effort
         password = ""  # noqa: F841
 
-    # Connect back to parent and send status-only reply.
+    return _helper_reply_and_exit(address, authkey, reply, cancel)
+
+
+def _helper_run_connected(
+    address: str,
+    authkey: bytes,
+    cancel: dict[str, bool],
+    command: list[str],
+    env_inject: dict[str, str],
+    by_name: dict[str, str],
+) -> int:
+    """Connect to parent first, then execute *command*, then send scrubbed I/O."""
+    from key_amnesia.run_exec import run_with_secrets
+
     try:
-        if parent_pid and not parent_alive(parent_pid):
-            theme.error("Parent gone; discarding reply.")
-            return 1
+        conn = ipc.connect(address, authkey)
+    except Exception as e:  # noqa: BLE001
+        theme.error(f"Failed to reply to parent: {e}")
+        input("Press Enter to close...")
+        cancel["flag"] = True
+        return 1
+
+    reply: dict[str, Any] = {"ok": False, "reason": ""}
+    try:
+        try:
+            result = run_with_secrets(command, env_inject, by_name)
+            reply["ok"] = True
+            reply["run_result"] = {
+                "exit_code": result.exit_code,
+                "scrubbed_stdout": result.scrubbed_stdout,
+                "scrubbed_stderr": result.scrubbed_stderr,
+            }
+        except Exception as e:  # noqa: BLE001
+            reply["ok"] = False
+            reply["reason"] = f"helper error: {e}"
+        safe = {
+            k: v
+            for k, v in reply.items()
+            if k in ("ok", "reason", "run_result", "status_only")
+        }
+        if "run_result" in safe and isinstance(safe["run_result"], dict):
+            rr = safe["run_result"]
+            safe["run_result"] = {
+                "exit_code": rr.get("exit_code"),
+                "scrubbed_stdout": rr.get("scrubbed_stdout", ""),
+                "scrubbed_stderr": rr.get("scrubbed_stderr", ""),
+            }
+        ipc.send_msg(conn, safe)
+    except Exception as e:  # noqa: BLE001
+        theme.error(f"Failed to reply to parent: {e}")
+        input("Press Enter to close...")
+        cancel["flag"] = True
+        return 1
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    cancel["flag"] = True
+    if reply.get("ok"):
+        theme.success("Done.")
+    else:
+        theme.out(f"Failed: {reply.get('reason', 'unknown')}")
+    time.sleep(0.8)
+    return 0 if reply.get("ok") else 1
+
+
+def _helper_reply_and_exit(
+    address: str,
+    authkey: bytes,
+    reply: dict[str, Any],
+    cancel: dict[str, bool],
+) -> int:
+    """Connect back to parent with a status-only reply, then exit.
+
+    Always attempts IPC — skipping it left parents with only
+    "helper exited without connecting" and no reason string.
+    """
+    try:
+        # Do not skip connect on a soft parent_alive miss — try anyway.
         conn = ipc.connect(address, authkey)
         try:
             # Final hard filter: never send password or raw secret maps.
@@ -677,6 +783,7 @@ def run_prompt_helper() -> int:
     except Exception as e:  # noqa: BLE001
         theme.error(f"Failed to reply to parent: {e}")
         input("Press Enter to close...")
+        cancel["flag"] = True
         return 1
 
     cancel["flag"] = True
