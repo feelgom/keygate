@@ -5,6 +5,8 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # Manual re-run after GitHub Actions infra flakes without a no-op commit.
+  workflow_dispatch:
 
 jobs:
   test:
@@ -14,12 +16,71 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
+    # No marketplace `uses:` steps: during Actions partial/major outages,
+    # "Set up job" fails while resolving action download info even before
+    # checkout. Prefer toolcache Python + git fetch instead.
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+      - name: Checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git fetch --depth 1 origin "${{ github.sha }}"
+          git checkout --force FETCH_HEAD
+
+      - name: Select Python ${{ matrix.python-version }}
+        id: py
+        run: |
+          set -euo pipefail
+          VER="${{ matrix.python-version }}"
+          case "${{ runner.os }}" in
+            Linux)   BASE="/opt/hostedtoolcache/Python" ;;
+            macOS)   BASE="/Users/runner/hostedtoolcache/Python" ;;
+            Windows) BASE="/c/hostedtoolcache/windows/Python" ;;
+            *) echo "unsupported OS ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64|amd64) ARCH=x64 ;;
+            arm64|aarch64) ARCH=arm64 ;;
+            *) ARCH=x64 ;;
+          esac
+          # Prefer exact x.y.* builds already present in the runner toolcache.
+          CAND=$(ls -d "${BASE}/${VER}".*/${ARCH} 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -z "${CAND}" ]; then
+            # Fall back to any arch folder for this version.
+            CAND=$(ls -d "${BASE}/${VER}".*/* 2>/dev/null | sort -V | tail -n 1 || true)
+          fi
+          if [ -z "${CAND}" ]; then
+            echo "No toolcache Python ${VER} under ${BASE}" >&2
+            ls -la "${BASE}" >&2 || true
+            exit 1
+          fi
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            PY="${CAND}/python.exe"
+          else
+            PY="${CAND}/bin/python"
+          fi
+          if [ ! -x "${PY}" ] && [ ! -f "${PY}" ]; then
+            echo "Python binary missing: ${PY}" >&2
+            exit 1
+          fi
+          echo "python=${PY}" >> "$GITHUB_OUTPUT"
+          "${PY}" -V
+
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          set -euo pipefail
+          PY="${{ steps.py.outputs.python }}"
+          "${PY}" -m pip install -U pip
+          "${PY}" -m pip install -e ".[dev]"
+
       - name: Test
-        run: pytest -q
+        run: |
+          set -euo pipefail
+          PY="${{ steps.py.outputs.python }}"
+          "${PY}" -m pytest -q
