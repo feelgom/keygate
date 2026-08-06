@@ -91,7 +91,8 @@ jobs:
             command -v uv
             uv python install "${VER}"
             VENV="${RUNNER_TEMP}/ka-py${VER}"
-            uv venv --python "${VER}" "${VENV}"
+            # --seed installs pip so later `python -m pip` works (uv venvs omit it by default).
+            uv venv --seed --python "${VER}" "${VENV}"
             if [ "${{ runner.os }}" = "Windows" ]; then
               PY="${VENV}/Scripts/python.exe"
             else
