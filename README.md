@@ -4,10 +4,17 @@
 
 # key-amnesia
 
-[![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
+<!-- Badge links are absolute for the same reason as the images below: PyPI renders
+     this README outside the repository and cannot resolve relative paths. -->
+[![release](https://img.shields.io/github/v/release/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/releases/latest)
 [![PyPI](https://img.shields.io/pypi/v/key-amnesia.svg)](https://pypi.org/project/key-amnesia/)
-[![Discord](https://img.shields.io/discord/1531406398334832690?label=discord&logo=discord)](https://discord.gg/4WnQfk49xX)
+[![downloads](https://img.shields.io/pypi/dm/key-amnesia)](https://pypistats.org/packages/key-amnesia)
+[![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
+[![stars](https://img.shields.io/github/stars/fujitoid/key-amnesia?logo=github)](https://github.com/fujitoid/key-amnesia/stargazers)
+[![license](https://img.shields.io/github/license/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/blob/master/LICENSE)
+[![changelog](https://img.shields.io/badge/changelog-Keep%20a%20Changelog-E05735)](https://github.com/fujitoid/key-amnesia/blob/master/CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://github.com/fujitoid/key-amnesia/wiki)
+[![Discord](https://img.shields.io/discord/1531406398334832690?label=discord&logo=discord)](https://discord.gg/4WnQfk49xX)
 
 **Let your AI agent *use* your passwords and API keys — without ever letting it *see* them.**
 
