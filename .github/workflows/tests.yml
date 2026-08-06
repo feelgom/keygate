@@ -9,6 +9,9 @@ on:
   # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -19,7 +22,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # No marketplace `uses:` steps: during Actions partial/major outages,
     # "Set up job" fails while resolving action download info even before
-    # checkout. Prefer toolcache Python + git fetch instead.
+    # checkout. Prefer toolcache Python + git fetch; install via uv on miss
+    # (macos-latest toolcache currently ships 3.11+ only, not 3.10).
     defaults:
       run:
         shell: bash
@@ -50,22 +54,44 @@ jobs:
             arm64|aarch64) ARCH=arm64 ;;
             *) ARCH=x64 ;;
           esac
-          # Prefer exact x.y.* builds already present in the runner toolcache.
-          CAND=$(ls -d "${BASE}/${VER}".*/${ARCH} 2>/dev/null | sort -V | tail -n 1 || true)
-          if [ -z "${CAND}" ]; then
-            # Fall back to any arch folder for this version.
-            CAND=$(ls -d "${BASE}/${VER}".*/* 2>/dev/null | sort -V | tail -n 1 || true)
-          fi
-          if [ -z "${CAND}" ]; then
-            echo "No toolcache Python ${VER} under ${BASE}" >&2
-            ls -la "${BASE}" >&2 || true
-            exit 1
-          fi
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            PY="${CAND}/python.exe"
+
+          find_toolcache() {
+            local cand
+            cand=$(ls -d "${BASE}/${VER}".*/${ARCH} 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -z "${cand}" ]; then
+              cand=$(ls -d "${BASE}/${VER}".*/* 2>/dev/null | sort -V | tail -n 1 || true)
+            fi
+            printf '%s' "${cand}"
+          }
+
+          resolve_bin() {
+            local cand="$1"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              printf '%s' "${cand}/python.exe"
+            else
+              printf '%s' "${cand}/bin/python"
+            fi
+          }
+
+          CAND=$(find_toolcache)
+          if [ -n "${CAND}" ]; then
+            PY=$(resolve_bin "${CAND}")
           else
-            PY="${CAND}/bin/python"
+            echo "No toolcache Python ${VER} under ${BASE}; installing via uv" >&2
+            ls -la "${BASE}" >&2 || true
+            if ! command -v uv >/dev/null 2>&1; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+            fi
+            # Windows GitHub bash: uv often lands in USERPROFILE\.local\bin
+            if ! command -v uv >/dev/null 2>&1; then
+              export PATH="${USERPROFILE}/.local/bin:${PATH}"
+            fi
+            command -v uv
+            uv python install "${VER}"
+            PY=$(uv python find "${VER}")
           fi
+
           if [ ! -x "${PY}" ] && [ ! -f "${PY}" ]; then
             echo "Python binary missing: ${PY}" >&2
             exit 1
