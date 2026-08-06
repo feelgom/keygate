@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [master]
   # Manual re-run after GitHub Actions infra flakes without a no-op commit.
+  # UI: Actions → tests → Run workflow → master
   workflow_dispatch:
 
 jobs:
