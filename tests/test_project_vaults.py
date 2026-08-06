@@ -247,13 +247,18 @@ def test_lock_path_beside_project_vault(tmp_path: Path) -> None:
     assert guard_lock_path_for_vault(vp) == vp.parent / "guard.lock"
 
 
-def test_registry_write_remove_no_authkey(ka_home: Path) -> None:
+def test_registry_write_remove_no_authkey(
+    ka_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
     vp = ka_home / "vault.bin"
     vp.write_bytes(b"x")
+    fake_pid = 12345
     p = write_guard_registry_entry(
         vault_path=vp,
         address="\\\\.\\pipe\\test",
-        pid=12345,
+        pid=fake_pid,
         expires_at=time.time() + 600,
         project_root=None,
         env_name=None,
@@ -262,14 +267,19 @@ def test_registry_write_remove_no_authkey(ka_home: Path) -> None:
     assert "authkey" not in data
     assert "authkey_hex" not in data
     assert data["vault_path"] == str(vp.resolve())
-    assert data["pid"] == 12345
-    # Fake pid → list should drop as stale
+    assert data["pid"] == fake_pid
+    # Only treat the current process as alive. A recycled Windows PID (or
+    # parent_alive fail-open on ACCESS_DENIED) must not keep the fake entry.
+    monkeypatch.setattr(
+        "key_amnesia.prompt_route.parent_alive",
+        lambda pid: pid == os.getpid(),
+    )
     assert list_guard_registry_entries() == []
     # Re-write with current pid so it stays live briefly
     write_guard_registry_entry(
         vault_path=vp,
         address="addr",
-        pid=__import__("os").getpid(),
+        pid=os.getpid(),
         expires_at=time.time() + 600,
     )
     live = list_guard_registry_entries()
