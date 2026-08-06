@@ -8,6 +8,7 @@
      this README outside the repository and cannot resolve relative paths. -->
 [![release](https://img.shields.io/github/v/release/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/releases/latest)
 [![PyPI](https://img.shields.io/pypi/v/key-amnesia.svg)](https://pypi.org/project/key-amnesia/)
+[![downloads](https://img.shields.io/pypi/dm/key-amnesia)](https://pypistats.org/packages/key-amnesia)
 [![tests](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml/badge.svg)](https://github.com/fujitoid/key-amnesia/actions/workflows/tests.yml)
 [![stars](https://img.shields.io/github/stars/fujitoid/key-amnesia?logo=github)](https://github.com/fujitoid/key-amnesia/stargazers)
 [![license](https://img.shields.io/github/license/fujitoid/key-amnesia)](https://github.com/fujitoid/key-amnesia/blob/master/LICENSE)
