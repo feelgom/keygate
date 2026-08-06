@@ -77,7 +77,8 @@ jobs:
           if [ -n "${CAND}" ]; then
             PY=$(resolve_bin "${CAND}")
           else
-            echo "No toolcache Python ${VER} under ${BASE}; installing via uv" >&2
+            # uv-managed interpreters are PEP 668 externally-managed; pip needs a venv.
+            echo "No toolcache Python ${VER} under ${BASE}; installing via uv + venv" >&2
             ls -la "${BASE}" >&2 || true
             if ! command -v uv >/dev/null 2>&1; then
               curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -89,7 +90,13 @@ jobs:
             fi
             command -v uv
             uv python install "${VER}"
-            PY=$(uv python find "${VER}")
+            VENV="${RUNNER_TEMP}/ka-py${VER}"
+            uv venv --python "${VER}" "${VENV}"
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              PY="${VENV}/Scripts/python.exe"
+            else
+              PY="${VENV}/bin/python"
+            fi
           fi
 
           if [ ! -x "${PY}" ] && [ ! -f "${PY}" ]; then
