@@ -115,6 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           PY="${{ steps.py.outputs.python }}"
+          "${PY}" -V
           "${PY}" -m pip install -U pip
           "${PY}" -m pip install -e ".[dev]"
 
