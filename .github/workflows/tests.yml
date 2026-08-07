@@ -20,9 +20,9 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
-    # Cap hung runners during Actions capacity incidents (macos can sit
-    # "in_progress" for an hour+ with no progress while the matrix is red).
-    timeout-minutes: 30
+    # Cap hung runners; macOS pytest often needs 45-75m (historical greens
+    # on master finished in ~1-2h). 30m cancelled healthy jobs mid-suite.
+    timeout-minutes: 90
     # No marketplace `uses:` steps: during Actions partial/major outages,
     # "Set up job" fails while resolving action download info even before
     # checkout. Prefer toolcache Python + git fetch; install via uv on miss
