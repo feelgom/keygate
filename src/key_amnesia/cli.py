@@ -188,7 +188,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Also check home dotfiles, shell history, global git config, "
-            "and known MCP config paths (not a full home walk)"
+            "known MCP config paths, and agent session transcripts "
+            "(Claude Code ~/.claude/projects/**/*.jsonl; Codex "
+            "~/.codex/sessions|archived_sessions/**/rollout-*.jsonl; "
+            "Copilot CLI ~/.copilot/session-state/*/events.jsonl). "
+            "Not a full home walk. Detection is advisory "
+            "(regex+entropy; false positives/negatives expected); "
+            "never prints secret values."
         ),
     )
     p_scan.add_argument(
@@ -1046,7 +1052,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     Default exclusions skip ``node_modules``, ``.venv``/``venv``, common
     build dirs, and ``.git`` internals. ``--deep`` adds home/shell/MCP
-    paths. Never prints secret values. Non-zero exit if any LEAK count > 0.
+    paths and known agent session transcript JSONL trees. Never prints
+    secret values. Detection is advisory (regex+entropy). Non-zero exit
+    if any LEAK count > 0.
     Optionally offers to store selected dotenv findings into the project
     vault via the shared ``dotenv_import`` core.
     """
