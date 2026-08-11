@@ -21,9 +21,11 @@ from key_amnesia.scan import (
     Finding,
     headline,
     importable_findings,
+    iter_agent_transcript_files,
     leak_count,
     scan_deep,
     scan_project,
+    transcript_line_hit_count,
 )
 
 
@@ -311,3 +313,171 @@ def test_scan_never_prints_values_human_report(
     assert "TOKEN" in captured.out
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE not in captured.err
+
+
+# --- Agent session transcript scan (--deep) ---
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "agent_transcripts"
+
+# Planted fake secrets in fixtures — must never appear in scan output.
+_TRANSCRIPT_PLANTED = (
+    "sk-ant-FAKESECRET_for_tests_only_xx",
+    "AbCdEfGh12345678XyZ",
+    "FAKEBEARERTOKEN123456",
+    "sk-proj-NOTAREALKEY_but_long_enough_abc",
+    "npm_abcdefghijklmnopqrstuv",
+)
+
+
+def _assert_no_planted(blob: str) -> None:
+    for secret in _TRANSCRIPT_PLANTED:
+        assert secret not in blob
+
+
+def _install_transcript_home(home: Path) -> dict[str, Path]:
+    """Lay out Claude / Codex / Copilot transcript trees under fake home."""
+    claude_proj = home / ".claude" / "projects" / "C--tmp-demo"
+    claude_proj.mkdir(parents=True)
+    session = claude_proj / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    session.write_text(
+        (_FIXTURES / "claude" / "session-with-leaks.jsonl").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    clean = claude_proj / "ffffffff-1111-2222-3333-444444444444.jsonl"
+    clean.write_text(
+        (_FIXTURES / "claude" / "session-clean.jsonl").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    sub = (
+        claude_proj
+        / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        / "subagents"
+        / "agent-deadbeef.jsonl"
+    )
+    sub.parent.mkdir(parents=True)
+    sub.write_text(
+        (_FIXTURES / "claude" / "subagent-with-leak.jsonl").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+
+    codex_day = home / ".codex" / "sessions" / "2026" / "01" / "01"
+    codex_day.mkdir(parents=True)
+    codex = codex_day / "rollout-with-leak.jsonl"
+    codex.write_text(
+        (_FIXTURES / "codex" / "rollout-with-leak.jsonl").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+
+    copilot = home / ".copilot" / "session-state" / "sess-1" / "events.jsonl"
+    copilot.parent.mkdir(parents=True)
+    copilot.write_text(
+        (_FIXTURES / "copilot" / "events-with-leak.jsonl").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+
+    return {
+        "claude_session": session,
+        "claude_clean": clean,
+        "claude_subagent": sub,
+        "codex": codex,
+        "copilot": copilot,
+    }
+
+
+def test_scan_deep_agent_transcripts_line_hits(
+    ka_home, tmp_path, monkeypatch
+) -> None:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    paths = _install_transcript_home(home)
+
+    findings = scan_deep(home)
+    transcripts = [f for f in findings if f.kind == "agent_session_transcript"]
+
+    session_f = next(f for f in transcripts if Path(f.path) == paths["claude_session"])
+    # Lines 3 (sk-ant) and 5 (nested API_KEY JSON string).
+    assert session_f.hit_lines == [3, 5]
+    assert session_f.secret_count == 2
+    assert session_f.scope == "deep"
+    assert any(n.upper() == "API_KEY" for n in session_f.secret_names)
+
+    assert not any(Path(f.path) == paths["claude_clean"] for f in transcripts)
+
+    sub_f = next(f for f in transcripts if Path(f.path) == paths["claude_subagent"])
+    assert sub_f.hit_lines == [1]
+    assert sub_f.secret_count == 1
+
+    codex_f = next(f for f in transcripts if Path(f.path) == paths["codex"])
+    assert codex_f.secret_count >= 1
+    assert 1 in codex_f.hit_lines
+
+    copilot_f = next(f for f in transcripts if Path(f.path) == paths["copilot"])
+    assert copilot_f.hit_lines == [1]
+
+    assert transcript_line_hit_count(findings) == sum(
+        f.secret_count for f in transcripts
+    )
+    blob = json.dumps([f.__dict__ for f in findings])
+    _assert_no_planted(blob)
+
+
+def test_scan_default_skips_home_transcripts(
+    ka_home, project_dir, tmp_path, monkeypatch
+) -> None:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _install_transcript_home(home)
+
+    findings = scan_project(project_dir)
+    assert not any(f.kind == "agent_session_transcript" for f in findings)
+
+
+def test_scan_cli_deep_transcripts_no_values(
+    ka_home, project_dir, tmp_path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _install_transcript_home(home)
+
+    rc = main(["scan", "--deep", "--no-import", "--json"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+
+    assert rc == 1
+    assert data["transcript_line_hits"] >= 4
+    assert any(f["kind"] == "agent_session_transcript" for f in data["findings"])
+    assert "advisory" in data["detection_note"].lower()
+    _assert_no_planted(captured.out)
+    _assert_no_planted(captured.err)
+    _assert_no_planted(json.dumps(data))
+
+    human_rc = main(["scan", "--deep", "--no-import"])
+    human = capsys.readouterr().out
+    assert human_rc == 1
+    assert "agent session transcripts" in human
+    assert "advisory" in human.lower()
+    _assert_no_planted(human)
+
+
+def test_iter_agent_transcript_files_globs(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    paths = _install_transcript_home(home)
+    found = {p.resolve() for p in iter_agent_transcript_files(home)}
+    assert paths["claude_session"].resolve() in found
+    assert paths["claude_subagent"].resolve() in found
+    assert paths["codex"].resolve() in found
+    assert paths["copilot"].resolve() in found
+    assert paths["claude_clean"].resolve() in found  # present on disk; clean has no LEAK

@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.7`.
+Versions follow the git tags `0.4.0` … `0.4.8`.
+
+## [0.4.8] — 2026-08-11
+
+### Added
+
+- `ka scan --deep` walks known **agent session transcript** JSONL trees (Claude Code `~/.claude/projects/**/*.jsonl` including subagents; Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`; Copilot CLI `~/.copilot/session-state/*/events.jsonl`). Reports path + line hits; never prints values. Detection remains advisory (regex+entropy; false positives/negatives expected).
 
 ## [0.4.7] — 2026-08-04
 

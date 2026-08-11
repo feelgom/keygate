@@ -1,10 +1,13 @@
 """``ka scan`` — LEAK (Locally Exposed Agent Keys) discovery.
 
-Walks a project tree (and optionally ``--deep`` home/shell/MCP locations)
-looking for plaintext secret *files* and light assignment patterns. Reports
-**names, paths, and counts only** — never prints, logs, or copies secret
-values.
+Walks a project tree (and optionally ``--deep`` home/shell/MCP locations
+plus known agent session transcript JSONL trees) looking for plaintext
+secret *files* and light assignment / prefix patterns. Reports **names,
+paths, counts, and (for transcripts) line numbers only** — never prints,
+logs, or copies secret values.
 
+Detection is **advisory** regex + entropy heuristics (same vocabulary as
+the secret-guard hook): false positives and false negatives are expected.
 Policy classification: Scan LEAK report is **advisory** (not cryptography).
 """
 
@@ -23,6 +26,7 @@ from key_amnesia.hooks.secret_guard import (
     _BEARER,
     _PREFIX_PATTERNS,
     _assignment_is_secret,
+    _collect_strings,
 )
 
 # Directory basenames skipped by default (B4). ``.git`` skips all git
@@ -57,6 +61,12 @@ _SKIP_SUFFIXES = (".pyc", ".pyo", ".egg-info")
 
 # Max bytes to read when content-scanning a non-dotenv file.
 _MAX_CONTENT_BYTES = 256_000
+
+# Skip oversized session transcripts (line-iter still; refuse open if huge).
+_MAX_TRANSCRIPT_BYTES = 100 * 1024 * 1024
+
+# Cap human-report line lists; full list remains in ``--json``.
+_HIT_LINES_DISPLAY_CAP = 20
 
 # Text-ish extensions worth content-scanning for assignment patterns.
 _CONTENT_SCAN_SUFFIXES = frozenset(
@@ -130,6 +140,8 @@ class Finding:
     reason: str = ""
     importable: bool = False
     scope: str = "project"  # "project" | "deep"
+    # 1-based JSONL line numbers (agent transcripts only).
+    hit_lines: list[int] = field(default_factory=list)
 
 
 def _is_dotenv_filename(name: str) -> bool:
@@ -258,6 +270,157 @@ def _content_prefix_hit(text: str) -> str | None:
     return None
 
 
+def scan_text_for_leaks(text: str) -> tuple[list[str], str | None]:
+    """Shared detector: assignment *names* + optional prefix/Bearer kind.
+
+    Never returns secret values. Same vocabulary as the secret-guard hook.
+    """
+    if not text:
+        return [], None
+    return _content_assignment_names(text), _content_prefix_hit(text)
+
+
+def _looks_like_json_container(s: str) -> bool:
+    t = s.lstrip()
+    return t.startswith("{") or t.startswith("[")
+
+
+def _strings_from_decoded_json(obj: Any) -> list[str]:
+    """Collect strings from a decoded JSON value; unwrap one nested JSON string."""
+    out: list[str] = []
+    for s in _collect_strings(obj):
+        out.append(s)
+        if not _looks_like_json_container(s):
+            continue
+        try:
+            nested = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(nested, (dict, list)):
+            out.extend(_collect_strings(nested))
+    return out
+
+
+def _scan_transcript_payload(obj: Any) -> tuple[list[str], str | None]:
+    """Run detectors on all string payloads from one JSONL line object."""
+    names: list[str] = []
+    seen: set[str] = set()
+    prefix: str | None = None
+    for s in _strings_from_decoded_json(obj):
+        line_names, line_prefix = scan_text_for_leaks(s)
+        for name in line_names:
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        if line_prefix and prefix is None:
+            prefix = line_prefix
+    return names, prefix
+
+
+def iter_agent_transcript_files(home: Path | None = None) -> Iterable[Path]:
+    """Yield known agent session JSONL transcript paths under ``home``.
+
+    Not a full home walk — only Claude Code / Codex / Copilot CLI layouts.
+    """
+    home = (home or Path.home()).resolve()
+    seen: set[str] = set()
+
+    def _emit(path: Path) -> Iterable[Path]:
+        try:
+            if not path.is_file():
+                return
+            key = str(path.resolve())
+        except OSError:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        yield path
+
+    claude_projects = home / ".claude" / "projects"
+    if claude_projects.is_dir():
+        try:
+            for path in claude_projects.rglob("*.jsonl"):
+                yield from _emit(path)
+        except OSError:
+            pass
+
+    for sub in ("sessions", "archived_sessions"):
+        root = home / ".codex" / sub
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("rollout-*.jsonl"):
+                yield from _emit(path)
+        except OSError:
+            pass
+
+    copilot_state = home / ".copilot" / "session-state"
+    if copilot_state.is_dir():
+        try:
+            for path in copilot_state.glob("*/events.jsonl"):
+                yield from _emit(path)
+        except OSError:
+            pass
+
+
+def _finding_for_transcript(path: Path, *, scope: str) -> Finding | None:
+    """Scan one JSONL session transcript; names/paths/line hits only."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > _MAX_TRANSCRIPT_BYTES:
+        return None
+
+    hit_lines: list[int] = []
+    all_names: list[str] = []
+    seen_names: set[str] = set()
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line_no, raw in enumerate(fh, start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                names, prefix = _scan_transcript_payload(obj)
+                if not names and not prefix:
+                    continue
+                hit_lines.append(line_no)
+                for name in names:
+                    key = name.upper()
+                    if key in seen_names:
+                        continue
+                    seen_names.add(key)
+                    all_names.append(name)
+    except OSError:
+        return None
+
+    if not hit_lines:
+        return None
+
+    return Finding(
+        path=str(path),
+        kind="agent_session_transcript",
+        secret_names=all_names,
+        secret_count=len(hit_lines),
+        reason=(
+            f"agent session transcript: {len(hit_lines)} line(s) with "
+            "credential-shaped content (advisory regex+entropy; false "
+            "positives/negatives expected)"
+        ),
+        importable=False,
+        scope=scope,
+        hit_lines=hit_lines,
+    )
+
+
 def _finding_for_path(path: Path, *, scope: str) -> Finding | None:
     kind = _filename_kind(path)
     if kind == "dotenv":
@@ -324,8 +487,7 @@ def _finding_for_path(path: Path, *, scope: str) -> Finding | None:
     text = _safe_read_text(path)
     if not text:
         return None
-    names = _content_assignment_names(text)
-    prefix = _content_prefix_hit(text)
+    names, prefix = scan_text_for_leaks(text)
     if not names and not prefix:
         return None
     count = len(names) if names else 1
@@ -463,7 +625,10 @@ def _deep_candidate_paths(home: Path | None = None) -> list[Path]:
 
 
 def scan_deep(home: Path | None = None) -> list[Finding]:
-    """Scan known home / shell / MCP locations (not a full home tree walk)."""
+    """Scan known home / shell / MCP / agent-transcript locations.
+
+    Not a full home tree walk — fixed candidates plus known transcript globs.
+    """
     findings: list[Finding] = []
     seen: set[str] = set()
     for path in _deep_candidate_paths(home):
@@ -481,12 +646,37 @@ def scan_deep(home: Path | None = None) -> list[Finding]:
             continue
         seen.add(finding.path)
         findings.append(finding)
+
+    for path in iter_agent_transcript_files(home):
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if key in seen:
+            continue
+        finding = _finding_for_transcript(path, scope="deep")
+        if finding is None:
+            continue
+        seen.add(finding.path)
+        # Also mark resolved key so candidate-path overlap cannot double-count.
+        seen.add(key)
+        findings.append(finding)
+
     findings.sort(key=lambda f: f.path)
     return findings
 
 
 def leak_count(findings: list[Finding]) -> int:
     return sum(max(f.secret_count, 0) for f in findings)
+
+
+def transcript_line_hit_count(findings: list[Finding]) -> int:
+    """Sum of LEAK line-hits in ``agent_session_transcript`` findings."""
+    return sum(
+        max(f.secret_count, 0)
+        for f in findings
+        if f.kind == "agent_session_transcript"
+    )
 
 
 def headline(findings: list[Finding], *, project_label: str = "this project") -> str:
@@ -501,16 +691,43 @@ def headline(findings: list[Finding], *, project_label: str = "this project") ->
 
 def findings_to_json(findings: list[Finding], *, project_root: str) -> dict[str, Any]:
     n = leak_count(findings)
+    transcript_hits = transcript_line_hit_count(findings)
     return {
         "leak_count": n,
+        "transcript_line_hits": transcript_hits,
         "headline": headline(findings),
         "project_root": project_root,
         "findings": [asdict(f) for f in findings],
+        "detection_note": (
+            "Advisory regex+entropy heuristics (secret-guard vocabulary); "
+            "false positives and false negatives are expected. "
+            "Values are never included."
+        ),
     }
+
+
+def _format_hit_lines(hit_lines: list[int]) -> str:
+    if not hit_lines:
+        return ""
+    if len(hit_lines) <= _HIT_LINES_DISPLAY_CAP:
+        shown = ", ".join(str(n) for n in hit_lines)
+        return f"\n      lines: {shown}"
+    head = hit_lines[:_HIT_LINES_DISPLAY_CAP]
+    rest = len(hit_lines) - _HIT_LINES_DISPLAY_CAP
+    shown = ", ".join(str(n) for n in head)
+    return f"\n      lines: {shown} (and {rest} more; see --json)"
 
 
 def format_human_report(findings: list[Finding], *, project_root: Path) -> str:
     lines: list[str] = [headline(findings), ""]
+    transcript_hits = transcript_line_hit_count(findings)
+    if transcript_hits:
+        unit = "LEAK" if transcript_hits == 1 else "LEAKs"
+        lines.append(
+            f"{transcript_hits} {unit} found in agent session transcripts "
+            f"(line-hits; advisory detection)"
+        )
+        lines.append("")
     if not findings:
         lines.append("No locally exposed agent keys found under default exclusions.")
         return "\n".join(lines)
@@ -524,11 +741,16 @@ def format_human_report(findings: list[Finding], *, project_root: Path) -> str:
             f"\n      names: {names}"
             f"\n      {f.reason}"
             + ("  [importable]" if f.importable else "")
+            + _format_hit_lines(f.hit_lines)
         )
         lines.append("")
     lines.append(
         "Values are never shown. Store importable dotenv findings with the "
         "post-scan offer, or run `ka import FILE`."
+    )
+    lines.append(
+        "Detection is advisory (regex + entropy heuristics); false positives "
+        "and false negatives are expected."
     )
     return "\n".join(lines)
 
