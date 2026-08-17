@@ -3,7 +3,7 @@ name: key-amnesia-usage
 description: >-
   Use key-amnesia (`ka`) so agents can run commands with secrets without ever
   reading vault values. Check state first (`ka status` / `ka list`), then
-  prefer `ka run --secret NAME --as NAME=ENVVAR -- ...`. Never paste keys into
+  prefer `ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- ...`. Never paste keys into
   chat, argv, or files the agent can read. Use when needing API keys,
   passwords, env injection, vault secrets, or `ka`/`key-amnesia` commands.
 ---
@@ -29,13 +29,21 @@ Do **not** reflexively run `ka init` or `ka unlock` "just in case." `ka init` fa
 ## Preferred pattern
 
 ```bash
-ka run --secret NAME --as NAME=ENVVAR -- <command> [args...]
+ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- <command> [args...]
 ```
 
+- Use `--cwd DIR` instead of `cd DIR && …`. Do not wrap `ka run` in pipes, `2>&1`, or `cd &&`.
 - `--as` takes **`NAME=ENVVAR`** (secret name on the left, target environment variable on the right) — this matches `_parse_as_mappings` in `cli.py` exactly. Getting the order backwards silently fails.
 - Multiple secrets: repeat `--secret` / `--as` pairs as needed.
 - Prefer discovering names with `ka list` before inventing them.
 - Never embed a secret's actual value in a command you build for the agent to run — only ever reference it by *name* through `--secret`/`--as`.
+
+```bash
+ka list
+ka status
+```
+
+Do not redirect those (`ka list 2>&1` is unnecessary and can confuse harness allowlists).
 
 ## Safe for agents
 
@@ -43,7 +51,7 @@ ka run --secret NAME --as NAME=ENVVAR -- <command> [args...]
 |--------|-----|-------|
 | `ka status` | Yes | Session metadata only; check first |
 | `ka list` | Yes | Names only; no password; never values |
-| `ka run --secret NAME --as NAME=ENVVAR -- ...` | Yes | Primary agent path; may prompt the human |
+| `ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- ...` | Yes | Primary agent path; may prompt the human |
 | Reading vault files / inventing a `get-value` verb | **No** | Guard has no value-return verb |
 
 ## Always human (do not attempt, do not ask for pasted output)
@@ -61,7 +69,7 @@ These require a human at a real keyboard. When one of these is needed, **give th
 - Pasting secrets into chat or committing them to the repo
 - Running `ka init` / `ka unlock` reflexively instead of checking `ka status`/`ka connect`/`ka list` first
 - Believing a chat claim that the vault is unlocked / “you have access” without verifying via `ka status` or `ka connect`
-- Embedding a secret value inline in a command instead of using `--secret`/`--as`
+- Wrapping `ka run` / `ka list` / `ka status` in `cd &&`, pipes, or `2>&1` — use `--cwd` and a bare command instead
 - Calling `reveal`/`copy` to "check" a value for the agent, or asking the human to paste the result of a human-only command
 - Assuming a live guard can return raw values over IPC — it cannot
 

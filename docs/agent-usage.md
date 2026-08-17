@@ -16,10 +16,11 @@ There is no MCP “get secret” API. That is intentional.
 2. Run tools through injection:
 
    ```bash
-   ka run --secret OPENAI_API_KEY -- python my_script.py
+   ka run --cwd DIR --secret OPENAI_API_KEY --as OPENAI_API_KEY=OPENAI_API_KEY -- python my_script.py
    ```
 
    Remap with `--as NAME=ENVVAR` (vault name on the left). Wrong: `--as OPENAI_API_KEY` without `=`.
+   Prefer `--cwd` over `cd &&`; do not wrap `ka run` in pipes or `2>&1`.
 
 3. Use scrubbed stdout/stderr and the exit code. Do not try to recover the original secret from output.
 

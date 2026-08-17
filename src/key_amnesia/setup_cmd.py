@@ -1,8 +1,10 @@
-"""`ka setup`: non-interactive install of packaged skills + secret-guard hook.
+"""`ka setup`: skills, secret-guard hook, and best-effort harness allow lists.
 
 Copies the three bundled agent skills to the Claude Code / Cursor / Codex
 skills directories and merges a `PreToolUse` (Claude, Codex) / `preToolUse`
-(Cursor) hook entry into each host's own config file. Safe to re-run
+(Cursor) hook entry into each host's own config file. Optionally merges
+harness *allow* rules so unattended ``ka run`` / ``ka list`` can proceed;
+the hook is the load-bearing *deny* for forbidden verbs. Safe to re-run
 (idempotent upsert); never drops unrelated keys or other hooks/matchers
 already present.
 """
@@ -166,15 +168,23 @@ def _check_path() -> str:
 def cmd_setup(args: argparse.Namespace) -> int:
     skills_only = bool(getattr(args, "skills_only", False))
     hook_only = bool(getattr(args, "hook_only", False))
-    if skills_only and hook_only:
-        theme.error("--skills-only and --hook-only are mutually exclusive.")
+    permissions_only = bool(getattr(args, "permissions_only", False))
+    permissions_remove = bool(getattr(args, "permissions_remove", False))
+    yes = bool(getattr(args, "yes", False))
+    only_flags = [skills_only, hook_only, permissions_only, permissions_remove]
+    if sum(1 for f in only_flags if f) > 1:
+        theme.error(
+            "--skills-only, --hook-only, --permissions-only, and "
+            "--permissions-remove are mutually exclusive."
+        )
         return 2
 
     home = Path.home()
     codex_home = _codex_home(home)
     lines: list[str] = []
+    rc = 0
 
-    if not hook_only:
+    if not hook_only and not permissions_only and not permissions_remove:
         dest_roots = [
             home / ".claude" / "skills",
             home / ".cursor" / "skills",
@@ -183,7 +193,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         ]
         lines.extend(_copy_skills(dest_roots))
 
-    if not skills_only:
+    if not skills_only and not permissions_only and not permissions_remove:
         claude_settings = home / ".claude" / "settings.json"
         cursor_hooks = home / ".cursor" / "hooks.json"
         codex_hooks = codex_home / "hooks.json"
@@ -194,10 +204,35 @@ def cmd_setup(args: argparse.Namespace) -> int:
         _merge_codex_hooks(codex_hooks)
         lines.append(f"hook installed: {codex_hooks} (PreToolUse)")
 
-    lines.append(_check_path())
-
     for line in lines:
         theme.out(line)
+
+    if permissions_remove:
+        from key_amnesia.harness_permissions import remove_manifested_rules
+
+        rc = remove_manifested_rules(home)
+    elif not skills_only and not hook_only:
+        from key_amnesia.harness_permissions import run_permissions
+
+        def _install_hook(name: str) -> None:
+            if name == "claude":
+                _merge_claude_settings(home / ".claude" / "settings.json")
+            elif name == "cursor":
+                _merge_cursor_hooks(home / ".cursor" / "hooks.json")
+            elif name == "codex":
+                _merge_codex_hooks(_codex_home(home) / "hooks.json")
+
+        perm_rc = run_permissions(
+            home,
+            yes=yes,
+            may_install_hook=not permissions_only,
+            install_hook_fn=_install_hook,
+        )
+        if perm_rc:
+            rc = perm_rc
+
+    if not permissions_only and not permissions_remove:
+        theme.out(_check_path())
 
     theme.info(
         "Restart Claude Code / Cursor / Codex (or reload the window) to pick "
@@ -209,4 +244,4 @@ def cmd_setup(args: argparse.Namespace) -> int:
     theme.info(
         "In your own terminal: `ka init` (first time) or `ka unlock` (start a session)."
     )
-    return 0
+    return rc

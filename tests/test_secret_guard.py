@@ -238,3 +238,180 @@ def test_main_fails_open_on_non_dict_json(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert rc == 0
     assert out == ""
+
+
+# --- verb deny (load-bearing) ------------------------------------------------
+
+
+DENY_SHELL_SAMPLES = [
+    "ka set FOO bar",
+    "ka remove FOO",
+    "ka import .env",
+    "ka passwd",
+    "ka init",
+    "ka unlock",
+    "ka grant FOO --to bob",
+    "ka revoke FOO --to bob",
+    "ka member add bob --pubkey x --role runner",
+    "ka member remove bob",
+    "ka config set session-mode cached",
+    "ka reveal FOO",
+    "ka export FOO",
+    "ka copy FOO",
+    "ka setup",
+    "ka identity create",
+    "ka scan --yes",
+]
+
+
+def _claude_payload(command: str, tool_name: str = "Bash") -> dict:
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"command": command},
+    }
+
+
+def _codex_payload(command: str, tool_name: str = "Bash") -> dict:
+    # Codex-like: Claude PreToolUse shape, no Cursor markers.
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"command": command},
+    }
+
+
+def _cursor_payload(command: str) -> dict:
+    return {
+        "hook_event_name": "preToolUse",
+        "cursor_version": "1.7.2",
+        "conversation_id": "abc",
+        "tool_name": "Shell",
+        "tool_input": {"command": command},
+    }
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_claude_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_claude_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "own terminal" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_codex_like_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_codex_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert "permission" not in reply
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_cursor_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_cursor_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["permission"] == "deny"
+    assert "hookSpecificOutput" not in reply
+    assert "own terminal" in reply["agent_message"]
+
+
+def test_write_tool_does_not_verb_deny_ka_set(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "README.md",
+            "contents": "Store secrets with `ka set NAME` in your own terminal.",
+        },
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_ka_safe_does_not_suppress_verb_deny(monkeypatch, capsys) -> None:
+    """_KA_SAFE matches `ka set` but verb deny still fires."""
+    rc, reply = _run_main(_claude_payload("ka set API_KEY sk-ant-" + "a" * 25), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "ka set" in reason
+    assert "own terminal" in reason
+
+
+def test_nested_run_set_denied(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret N --as N=E -- ka set FOO bar"),
+        monkeypatch,
+        capsys,
+    )
+    assert reply is not None
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "wrapping" in reason
+    assert "ka set" in reason
+
+
+def test_chained_secret_after_ka_run_denied(monkeypatch, capsys) -> None:
+    token = "sk-ant-" + "a" * 25
+    cmd = (
+        "ka run --secret X --as X=V -- python a.py && "
+        f'curl -H "Authorization: Bearer {token}"'
+    )
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Anthropic" in reason or "Bearer" in reason
+
+
+def test_pipe_tail_after_ka_run_no_finding(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret X --as X=V -- python a.py | tail -30"
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_nested_run_python_allowed(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret N --as N=E -- python script.py"),
+        monkeypatch,
+        capsys,
+    )
+    assert rc == 0
+    assert reply is None
+
+
+def test_trailing_secret_after_run_denied(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret N --as N=E -- python deploy.py --api-key " + "sk-ant-" + "a" * 25
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "Anthropic" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_ordinary_ka_run_no_trailing_finding(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret NAME --as NAME=VAR -- python script.py"
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_ka_scan_without_yes_allowed(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_claude_payload("ka scan --deep --no-import"), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_find_finding_ka_safe_skips_prefix_but_trailing_scan_does_not() -> None:
+    prefix = "ka run --secret NAME --as NAME=VAR -- python script.py"
+    assert sg.find_finding(prefix) is None
+    trailing = "python deploy.py --api-key " + "sk-ant-" + "a" * 25
+    assert sg.find_finding(prefix + " " + trailing) is None  # _KA_SAFE on full text
+    assert sg.find_finding(trailing, ignore_ka_safe=True) is not None

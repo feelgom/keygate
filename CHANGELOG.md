@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.8`.
+Versions follow the git tags `0.4.0` … `0.4.9`.
+
+## [0.4.9] — 2026-08-17
+
+### Behavior change
+
+- Agents that previously ran `ka set` (and other mutating verbs) because `_KA_SAFE` skipped secret scanning will now be **hook-denied**. The deny message names the exact command to run in the user's own terminal (do not paste the result into chat). File allow-lists are best-effort so unattended `ka run` / `ka list` can proceed; **the PreToolUse hook is the load-bearing deny**.
+
+### Added
+
+- `ka setup` merges harness **allow** rules (Claude `permissions.allow` plus existing `autoMode.allow`; Cursor prefixes only when that cannot clobber the IDE list). `--permissions-only`, `--permissions-remove`, `--yes`. Codex remains print-only (`config.toml` has no command rules); trust the hook via `/hooks`.
+- Hook verb-deny for forbidden `ka` invocations (including `python -m key_amnesia`, `uvx`/`pipx`, path suffixes, `env` prefixes, `sh -c`, and nested `ka run -- …`). `ka scan --yes` is denied; unrecognized verbs fail open.
+- Secret scan of the command **after** `ka run --` (so `python deploy.py --api-key sk-ant-…` is denied) without nagging on `--secret NAME --as NAME=VAR`.
+- `ka run --cwd DIR` (absolute resolve; missing/not-a-directory → exit 2).
+
+### Changed
+
+- Usage skill prefers a bare `ka run --cwd DIR --secret … --as … -- <command>` — no `cd &&`, pipes, or `2>&1`.
+- `ka init` prints `Next: ka setup`.
 
 ## [0.4.8] — 2026-08-11
 

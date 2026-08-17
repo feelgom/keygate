@@ -74,3 +74,8 @@ def guards_registry_dir() -> Path:
 
 def audit_log_path() -> Path:
     return data_dir() / "audit.log"
+
+
+def permissions_manifest_path() -> Path:
+    """Record of allow/deny strings last written by ``ka setup``."""
+    return data_dir() / "permissions-manifest.json"

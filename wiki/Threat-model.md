@@ -38,6 +38,14 @@ isolation than the product states:
     the session (not the master password).
 12. **Runner role** — not a crypto ACL against the master-password holder;
     per-member `ka export` ciphertext *is* cryptographic.
+13. **Harness allow files vs hook deny.** File allow-lists try to let
+    agents run `ka run` / `ka list`. The PreToolUse hook is the
+    load-bearing deny for `ka set` / `reveal` / `scan --yes` / nested
+    `ka run -- ka set`. Removing or disabling the hook removes deny.
+    Aliases, renamed binaries, and runtime-constructed `ka` invocations
+    are out of scope. Codex deny runs only after `/hooks` trust.
+14. **Write/Edit hook self-protection** (agent rewriting the hook or
+    harness config) is planned, not this release.
 
 ## Platform honesty (admission)
 
@@ -72,6 +80,8 @@ isolation than the product states:
 | KAM2 per-secret wrap / export | Crypto |
 | Admin signature | Tamper-evident / detection only |
 | Runner no reveal/copy | Policy vs human; effective vs agent |
+| Harness file allow-lists | Best-effort (unattended `ka run`) |
+| PreToolUse verb deny | Load-bearing vs agent Bash; not a sandbox |
 
 Canonical design text: repository `DESIGN.md`. README Security limits are
 the short honesty contract.
