@@ -251,6 +251,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Command to run (use -- before command)",
     )
     p_run.add_argument(
+        "--cwd",
+        default=None,
+        metavar="DIR",
+        help="Directory to run the command in (absolute path after resolve)",
+    )
+    p_run.add_argument(
         "--name",
         default=None,
         metavar="LABEL",
@@ -356,7 +362,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # setup (agent distribution: skills + PreToolUse/preToolUse hook)
     p_setup = sub.add_parser(
         "setup",
-        help="Install agent skills and the secret-guard hook for Claude Code / Cursor / Codex",
+        help="Install agent skills, the secret-guard hook, and harness allow-lists",
     )
     p_setup.add_argument(
         "--skills-only",
@@ -367,6 +373,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--hook-only",
         action="store_true",
         help="Only merge the hook config; skip installing skills",
+    )
+    p_setup.add_argument(
+        "--permissions-only",
+        action="store_true",
+        help="Only merge harness allow-lists; skip skills and hook install",
+    )
+    p_setup.add_argument(
+        "--permissions-remove",
+        action="store_true",
+        help="Remove previously recorded key-amnesia allow/deny rules",
+    )
+    p_setup.add_argument(
+        "--yes",
+        action="store_true",
+        help="Do not prompt before writing permission files (never deletes user allows)",
     )
 
     # docs — open/print wiki URL; no vault/guard/password
@@ -550,6 +571,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     theme.info(
         "Remember your master password — it cannot be recovered if forgotten."
     )
+    theme.info("Next: ka setup")
     return 0
 
 
@@ -1171,6 +1193,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         theme.error("Usage: key-amnesia run --secret NAME [--as NAME=ENV] -- command...")
         return 2
 
+    cwd_raw = getattr(args, "cwd", None)
+    if cwd_raw:
+        cwd_path = Path(cwd_raw).expanduser().resolve()
+        if not cwd_path.is_dir():
+            theme.error(f"Error: --cwd is not a directory: {cwd_raw}")
+            return 2
+        run_cwd = str(cwd_path)
+    else:
+        run_cwd = os.getcwd()
+
     inject_as = _parse_as_mappings(args.as_env)
     secret_names = list(args.secret or [])
     # Also include names only referenced in --as
@@ -1212,7 +1244,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "secret_names": secret_names,
                 "inject_as": inject_as,
                 "command": cmd,
-                "cwd": os.getcwd(),
+                "cwd": run_cwd,
             },
             timeout=3600,
             lock_path=ctx.lock_path,
@@ -1249,6 +1281,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         command=cmd,
         inject_as=inject_as,
         vault_path=str(ctx.vault_path),
+        cwd=run_cwd,
     )
     ok, password, outcome = _auth_password(request)
     if not ok:
@@ -1275,7 +1308,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 1
         env_inject = {inject_as.get(n, n): secrets_map[n] for n in secret_names}
         by_name = {n: secrets_map[n] for n in secret_names}
-        result = run_with_secrets(cmd, env_inject, by_name)
+        result = run_with_secrets(cmd, env_inject, by_name, cwd=run_cwd)
         audit_event(
             "run",
             secret_names=secret_names,

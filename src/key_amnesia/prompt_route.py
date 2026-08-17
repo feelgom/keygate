@@ -48,6 +48,8 @@ class PromptRequest:
     mutation: str = ""
     # Vault path override for helper
     vault_path: str = ""
+    # Working directory for `ka run` (absolute). Empty = helper process cwd.
+    cwd: str = ""
 
 
 @dataclass
@@ -443,6 +445,7 @@ def run_prompt_helper() -> int:
             "inject_as": {},
             "detail": "",
             "vault_path": "",
+            "cwd": "",
         }.items()
     })
     # Fix types from JSON
@@ -454,6 +457,7 @@ def run_prompt_helper() -> int:
         detail=str(request_data.get("detail") or ""),
         mutation=str(request_data.get("mutation") or ""),
         vault_path=str(request_data.get("vault_path") or ""),
+        cwd=str(request_data.get("cwd") or ""),
     )
 
     if parent_pid and not parent_alive(parent_pid):
@@ -561,6 +565,7 @@ def run_prompt_helper() -> int:
                             request.command,
                             env_inject,
                             by_name,
+                            cwd=request.cwd or None,
                         )
 
                 elif action == "reveal":
@@ -691,6 +696,7 @@ def _helper_run_connected(
     command: list[str],
     env_inject: dict[str, str],
     by_name: dict[str, str],
+    cwd: str | None = None,
 ) -> int:
     """Connect to parent first, then execute *command*, then send scrubbed I/O."""
     from key_amnesia.run_exec import run_with_secrets
@@ -706,7 +712,7 @@ def _helper_run_connected(
     reply: dict[str, Any] = {"ok": False, "reason": ""}
     try:
         try:
-            result = run_with_secrets(command, env_inject, by_name)
+            result = run_with_secrets(command, env_inject, by_name, cwd=cwd)
             reply["ok"] = True
             reply["run_result"] = {
                 "exit_code": result.exit_code,

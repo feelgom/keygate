@@ -29,7 +29,7 @@ def test_init_mismatch_creates_nothing(
 
 
 def test_init_match_creates_unlockable_vault(
-    ka_home: Path, monkeypatch: pytest.MonkeyPatch
+    ka_home: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
@@ -38,10 +38,12 @@ def test_init_match_creates_unlockable_vault(
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(answers))
 
     rc = main(["init"])
+    captured = capsys.readouterr()
     assert rc == 0
     assert vault_path().exists()
     payload = load_vault(vault_path(), pw)
     assert payload["secrets"] == {}
+    assert "Next: ka setup" in captured.out + captured.err
 
 
 def test_init_refuses_if_vault_exists(

@@ -18,6 +18,7 @@ def _args(**kwargs: Any) -> argparse.Namespace:
         cmd=kwargs.get("cmd", ["--", "echo", "hi"]),
         secret=kwargs.get("secret", ["api_key"]),
         as_env=kwargs.get("as_env", []),
+        cwd=kwargs.get("cwd", None),
         env=None,
         vault=None,
         force_global=False,
