@@ -199,10 +199,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_scan.add_argument(
         "--include-excluded",
+        "--wide",
         action="store_true",
+        dest="include_excluded",
         help=(
             "Include default-excluded dirs (node_modules, .venv/venv, build "
-            "dirs, .git internals). Git-history scanning is still out of scope."
+            "dirs, .git internals). --wide is an alias. Git-history scanning "
+            "is still out of scope. Independent of --deep."
         ),
     )
     p_scan.add_argument(
@@ -211,21 +214,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON instead of human text",
     )
     p_scan.add_argument(
-        "--fail-on",
-        choices=("high", "possible"),
+        "--strict",
+        choices=("certain", "high", "paranoid"),
         default="high",
         help=(
-            "Exit 1 when this class of findings is present. "
-            "high (default): high-confidence only. "
-            "possible: also fail on identifier/passphrase-shaped hits"
-        ),
-    )
-    p_scan.add_argument(
-        "--show-possible",
-        action="store_true",
-        help=(
-            "Include possible (identifier- or passphrase-shaped) hits in "
-            "the human report. --json always includes them"
+            "Exit 1 when findings at this gate are present. "
+            "certain: vendor prefixes and confirmed filenames only. "
+            "high (default): certain + likely (assignments/UUID). "
+            "paranoid: also possible (identifier/passphrase/low-transition; "
+            "this is the 0.4.9-and-earlier assignment gate). Invalid value exits 2"
         ),
     )
     p_scan.add_argument(
@@ -1093,8 +1090,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     Default exclusions skip ``node_modules``, ``.venv``/``venv``, common
     build dirs, and ``.git`` internals. ``--deep`` adds home/shell/MCP
     paths and known agent session transcript JSONL trees. Never prints
-    secret values. Headline and default exit count high-confidence
-    findings only; ``--fail-on possible`` restores the older gate.
+    secret values. Headline names the ``--strict`` gate; default
+    ``--strict high`` counts certain + likely. ``--strict paranoid`` is
+    the 0.4.9-and-earlier assignment gate. ``--wide`` aliases ``--include-excluded``.
     Optionally offers to store selected dotenv findings into the project
     vault via the shared ``dotenv_import`` core.
     """
@@ -1113,12 +1111,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 seen.add(f.path)
 
     as_json = bool(getattr(args, "json", False))
-    show_possible = bool(getattr(args, "show_possible", False))
+    strict = getattr(args, "strict", "high") or "high"
     if as_json:
         theme.out(
             json.dumps(
                 scan_mod.findings_to_json(
-                    findings, project_root=str(project_root)
+                    findings,
+                    project_root=str(project_root),
+                    strict=strict,
                 ),
                 indent=2,
             )
@@ -1129,18 +1129,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
             scan_mod.format_human_report(
                 findings,
                 project_root=project_root,
-                show_possible=show_possible,
+                strict=strict,
             )
         )
         theme.out("")
 
-    n = scan_mod.leak_count(findings)
-    p = scan_mod.possible_count(findings)
-    fail_on = getattr(args, "fail_on", "high") or "high"
-    if fail_on == "possible":
-        exit_code = 1 if (n > 0 or p > 0) else 0
-    else:
-        exit_code = 1 if n > 0 else 0
+    n = scan_mod.leak_count(findings, strict=strict)
+    exit_code = 1 if n > 0 else 0
 
     # JSON / --no-import: report only. Interactive offer otherwise.
     if as_json or getattr(args, "no_import", False):

@@ -8,19 +8,20 @@ Versions follow the git tags `0.4.0` … `0.4.10`.
 
 ### Behavior change
 
-- `ka scan` exit 1 now means **high-confidence** findings only (`likely` assignment values, vendor prefixes, and filename hits such as `.env`). Trees that exited 1 on identifier / function-call / doc-assignment hits now exit **0**. Use `ka scan --fail-on possible` to restore the older gate (also the CI opt-in for word-shaped passphrases). Invalid `--fail-on` exits 2.
+- `ka scan` exit 1 follows `--strict` (`certain` / `high` / `paranoid`, default `high`): **certain** is vendor prefixes and confirmed filenames; **likely** is assignment and UUID hits; **possible** is identifier, passphrase, low-transition, and unconfirmed `mcp.json`. Default exit 1 means certain + likely. Trees that exited 1 on identifier / function-call / doc-assignment hits in ≤0.4.9 now exit **0** unless you pass `--strict paranoid` (that is the ≤0.4.9 assignment gate). Invalid `--strict` exits 2.
 
-Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-threshold assignment hit (English identifiers, `token = secrets.token_hex(8)`, this repo’s own typed annotations). The headline is high-confidence only; identifier- and passphrase-shaped hits are a separate `possible_count` (`--json` always; `--show-possible` for human).
+Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-threshold assignment hit (English identifiers, `token = secrets.token_hex(8)`, this repo’s own typed annotations). The three-count summary (`N certain · N likely · N possible`) prints at every strictness; only the listing, exit, and headline number change.
 
 ### Added
 
 - Shared detector module (`key_amnesia.detect`) with explicit tiers: `none` / `possible` / `likely` / `prefix`. Hook still denies `possible|likely|prefix` except function-call and `Name[...]` type-annotation values.
-- `ka scan --fail-on {high,possible}` (default `high`) and `--show-possible`.
+- `ka scan --strict` with values `certain`, `high`, or `paranoid` (default `high`). `--wide` aliases `--include-excluded` and is independent of `--deep`.
 - Quoted-name assignments (`"api_key": "…"`) and JSON key walk for transcripts.
+- Named reasons on findings (`uuid`, `identifier`, `word-shaped-passphrase`, `low-transition`, `unconfirmed-mcp-shape`). Unconfirmed `mcp.json` / `claude_desktop_config.json` demote to possible; they are not dropped.
 
 ### Changed
 
-- Human headline: `N high-confidence LEAK` plus one secondary sentence with the possible count and passphrase caveat — not a path dump of possibles.
+- Human headline: `N LEAKs found (--strict high) — your agent can read N secrets in this project (LEAK = Locally Exposed Agent Keys)`. The gate name is in the headline. The three-count summary is unconditional.
 
 ## [0.4.9] — 2026-08-17
 

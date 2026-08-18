@@ -11,7 +11,7 @@ notes live in the repository `DESIGN.md`.
 | `ka remove NAME` | Delete a secret |
 | `ka import FILE` | Import dotenv into resolved vault (TTY-only) |
 | `ka check [--json]` | Manifest vs project names sidecar (CI; no decrypt) |
-| `ka scan [--deep] [--include-excluded] [--json] [--fail-on high|possible] [--show-possible] [--yes] [--no-import]` | LEAK report (names/paths/counts only); optional offer-to-import |
+| `ka scan [--deep] [--wide] [--include-excluded] [--json] [--strict] [--yes] [--no-import]` | LEAK report (names/paths/counts only); optional offer-to-import |
 | `ka run --secret NAME [--as NAME=ENVVAR] -- <cmd>` | Inject + scrub; agent-facing path (`=` form required for `--as`) |
 | `ka list` | Names only; safe for agents; no prompt |
 | `ka unlock [--pre-admit] [--pre-admit-secret NAME] [--admit-tree]` | Start cached guard session (pre-admit / admit-tree flags opt-in) |
@@ -40,12 +40,11 @@ ka run --secret API_KEY -- python my_script.py
 ### `scan` flags
 
 - `--deep` — also check home dotfiles, shell history, global git config,
-  known MCP paths (not a full home walk)
-- `--include-excluded` — include default-excluded dirs; git-history scan
-  still out of scope
-- `--json` — machine-readable report (`leak_count` is high-confidence; always includes `possible_count` and per-finding `confidence`)
-- `--fail-on {high,possible}` — default `high`: exit 1 iff high-confidence `leak_count` > 0. `possible` also fails on identifier/passphrase-shaped hits (old CI gate; word-shaped passphrases). Invalid value → exit 2
-- `--show-possible` — list possible hits in the human report (not dumped by default)
+  known MCP paths (not a full home walk). Independent of `--wide`.
+- `--include-excluded` / `--wide` — include default-excluded dirs; git-history scan
+  still out of scope. `--wide` is an alias only.
+- `--json` — machine-readable report (`leak_count` matches the `--strict` gate; always includes `certain_count`, `likely_count`, `possible_count`, and per-finding `confidence` + `reasons`)
+- `--strict certain|high|paranoid` — default `high`: exit 1 iff certain+likely `leak_count` > 0. `certain` is prefixes and confirmed filenames. `paranoid` also fails on identifier/passphrase/low-transition hits (the ≤0.4.9 assignment gate). Invalid value → exit 2. Headline names the gate. The three-count summary prints at every strictness.
 - `--yes` — import all importable dotenv findings without selection
   prompts (password still required)
 - `--no-import` — report only; never offer vault store

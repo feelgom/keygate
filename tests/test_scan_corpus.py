@@ -19,7 +19,10 @@ import pytest
 
 from key_amnesia.cli import main
 from key_amnesia.detect import (
+    NAMED_WEAKENING_FUNCTION_CALL,
+    NAMED_WEAKENING_IDENTIFIER,
     NAMED_WEAKENING_LOW_TRANSITION,
+    NAMED_WEAKENING_TYPE_ANNOTATION,
     NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
     NAMED_WEAKENINGS,
     REASON_UNCONFIRMED_MCP,
@@ -31,7 +34,10 @@ from key_amnesia.detect import (
 )
 from key_amnesia.hooks import secret_guard as sg
 from key_amnesia.scan import (
+    Finding,
     _findings_for_transcript,
+    format_count_summary,
+    headline,
     leak_count,
     possible_count,
     scan_project,
@@ -55,6 +61,13 @@ DEMOTED_TO_WEAKENING = {
     "passphrase_correct_horse_battery.py": NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
     "low_transition_summervineyard.py": NAMED_WEAKENING_LOW_TRANSITION,
 }
+NEGATIVE_TO_WEAKENING = {
+    "function_call_secrets.py": NAMED_WEAKENING_FUNCTION_CALL,
+    "function_call_get_token.py": NAMED_WEAKENING_FUNCTION_CALL,
+    "type_annotation.py": NAMED_WEAKENING_TYPE_ANNOTATION,
+    "camelcase_identifier.py": NAMED_WEAKENING_IDENTIFIER,
+}
+FILENAME_DEMOTED = frozenset({"mcp.json"})
 
 # 0.4.9 assignment heuristic — before-measurement only.
 _LEGACY_ASSIGN = re.compile(
@@ -132,7 +145,7 @@ def _file_has_likely_or_prefix(text: str) -> bool:
     if find_prefix_kind(text):
         return True
     hits = scan_text_hits(text)
-    return bool(hits.likely_names or hits.prefix)
+    return bool(hits.likely_names or hits.prefix or hits.bearer_likely)
 
 
 def _assert_no_gen_values(blob: str) -> None:
@@ -160,7 +173,11 @@ def test_negatives_not_likely_or_prefix(path: Path) -> None:
     assert not _file_has_likely_or_prefix(text)
 
 
-@pytest.mark.parametrize("path", _iter_files(DEMOTED), ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "path",
+    [p for p in _iter_files(DEMOTED) if p.name not in FILENAME_DEMOTED],
+    ids=lambda p: p.name,
+)
 def test_demoted_is_possible_and_named(path: Path) -> None:
     assert path.name in DEMOTED_TO_WEAKENING
     assert DEMOTED_TO_WEAKENING[path.name] in NAMED_WEAKENINGS
@@ -177,7 +194,13 @@ def test_demoted_is_possible_and_named(path: Path) -> None:
 
 def test_demoted_files_all_mapped() -> None:
     names = {p.name for p in _iter_files(DEMOTED)}
-    assert names == set(DEMOTED_TO_WEAKENING)
+    assert names == set(DEMOTED_TO_WEAKENING) | FILENAME_DEMOTED
+
+
+def test_every_named_weakening_has_a_fixture() -> None:
+    mapped = set(DEMOTED_TO_WEAKENING.values()) | set(NEGATIVE_TO_WEAKENING.values())
+    assert set(NAMED_WEAKENINGS) <= mapped
+    assert (DEMOTED / "mcp.json").is_file()
 
 
 @pytest.mark.parametrize("path", _iter_files(POSITIVES), ids=lambda p: p.name)
@@ -216,26 +239,27 @@ def test_demoted_only_tmp_scan_exit_paths(
     assert rc == 0
     assert data["leak_count"] == 0
     assert data["possible_count"] > 0
-    assert all(f["confidence"] in ("high", "possible") for f in data["findings"])
+    assert all(
+        f["confidence"] in ("certain", "likely", "possible") for f in data["findings"]
+    )
     _assert_no_gen_values(captured.out + captured.err)
 
-    rc = main(["scan", "--no-import", "--fail-on", "high"])
-    capsys.readouterr()
-    assert rc == 0
-
-    rc = main(["scan", "--no-import", "--fail-on", "possible"])
-    captured = capsys.readouterr()
-    assert rc == 1
-    _assert_no_gen_values(captured.out + captured.err)
-
-    rc = main(["scan", "--no-import", "--show-possible"])
+    rc = main(["scan", "--no-import", "--strict", "high"])
     captured = capsys.readouterr()
     assert rc == 0
+    assert "--strict high" in captured.out
+    assert "certain ·" in captured.out
     assert "possible" in captured.out.lower()
     _assert_no_gen_values(captured.out + captured.err)
 
+    rc = main(["scan", "--no-import", "--strict", "paranoid"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "--strict paranoid" in captured.out
+    _assert_no_gen_values(captured.out + captured.err)
 
-def test_high_confidence_tree_exits_1_both_fail_on(
+
+def test_likely_tree_exits_1_strict_high_and_paranoid(
     ka_home, tmp_path, monkeypatch, capsys
 ) -> None:
     tree = tmp_path / "high"
@@ -243,22 +267,22 @@ def test_high_confidence_tree_exits_1_both_fail_on(
     (tree / "config.py").write_text(f'api_key = "{_GEN_MIXED}"\n', encoding="utf-8")
     monkeypatch.chdir(tree)
 
-    rc = main(["scan", "--no-import", "--fail-on", "high", "--json"])
+    rc = main(["scan", "--no-import", "--strict", "high", "--json"])
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert rc == 1
     assert data["leak_count"] >= 1
     _assert_no_gen_values(captured.out + captured.err)
 
-    rc = main(["scan", "--no-import", "--fail-on", "possible"])
+    rc = main(["scan", "--no-import", "--strict", "paranoid"])
     captured = capsys.readouterr()
     assert rc == 1
     _assert_no_gen_values(captured.out + captured.err)
 
 
-def test_fail_on_invalid_exits_2(ka_home) -> None:
+def test_strict_invalid_exits_2(ka_home) -> None:
     with pytest.raises(SystemExit) as exc:
-        main(["scan", "--no-import", "--fail-on", "nope"])
+        main(["scan", "--no-import", "--strict", "nope"])
     assert exc.value.code == 2
 
 
@@ -290,7 +314,11 @@ def test_generated_likely_in_env_json_yaml_toml_export(
 
     findings = scan_project(tree)
     assert leak_count(findings) >= 1
-    paths = {Path(f.path).name for f in findings if f.confidence == "high"}
+    paths = {
+        Path(f.path).name
+        for f in findings
+        if f.confidence in ("certain", "likely")
+    }
     assert ".env" in paths
     assert "config.json" in paths
     assert "config.yaml" in paths
@@ -372,7 +400,7 @@ def test_transcript_mixed_line_records_possible_names(tmp_path: Path) -> None:
     findings = _findings_for_transcript(path, scope="deep")
     assert leak_count(findings) >= 1
     assert possible_count(findings) > 0
-    high = [f for f in findings if f.confidence == "high"]
+    high = [f for f in findings if f.confidence in ("certain", "likely")]
     poss = [f for f in findings if f.confidence == "possible"]
     assert high and high[0].hit_lines == [1]
     assert poss
@@ -434,7 +462,7 @@ def test_mcp_json_unrecognised_shape_demotes_not_dropped(ka_home, tmp_path) -> N
         if f.kind == "mcp_config" and Path(f.path).name == "mcp.json"
     ]
     assert confirmed
-    assert confirmed[0].confidence == "high"
+    assert confirmed[0].confidence == "certain"
     assert leak_count(findings) >= 1
 
 
@@ -480,3 +508,126 @@ def test_nested_jsonl_secret_key_walk_and_timing(tmp_path: Path) -> None:
     # 200 lines of the 4000-line secret-keyed shape; after-fix 4000-line was
     # 51.9s so this budget is ~2.6s typical. Fail if the double-walk returns.
     assert elapsed < 8.0
+
+
+def test_strict_headline_and_summary_example_shape() -> None:
+    findings = [
+        Finding(
+            path="a.env",
+            kind="dotenv",
+            secret_names=["A"],
+            secret_count=1,
+            reason="dotenv",
+            confidence="certain",
+        ),
+        Finding(
+            path="b.py",
+            kind="inline",
+            secret_names=["k"],
+            secret_count=3,
+            reason="likely",
+            confidence="likely",
+        ),
+        Finding(
+            path="c.py",
+            kind="inline",
+            secret_names=["i"],
+            secret_count=19,
+            reason="possible",
+            confidence="possible",
+            reasons=["identifier"],
+            reason_counts={"identifier": 19},
+        ),
+        Finding(
+            path="d.py",
+            kind="inline",
+            secret_names=["p"],
+            secret_count=6,
+            reason="possible",
+            confidence="possible",
+            reasons=["word-shaped-passphrase"],
+            reason_counts={"word-shaped-passphrase": 6},
+        ),
+        Finding(
+            path="e.py",
+            kind="inline",
+            secret_names=["l"],
+            secret_count=3,
+            reason="possible",
+            confidence="possible",
+            reasons=["low-transition"],
+            reason_counts={"low-transition": 3},
+        ),
+    ]
+    summary = format_count_summary(findings)
+    assert summary == (
+        "1 certain · 3 likely · 28 possible "
+        "(19 identifier · 6 passphrase · 3 low-transition)"
+    )
+    assert headline(findings, strict="certain").startswith(
+        "1 LEAK found (--strict certain)"
+    )
+    assert headline(findings, strict="high").startswith(
+        "4 LEAKs found (--strict high)"
+    )
+    assert headline(findings, strict="paranoid").startswith(
+        "32 LEAKs found (--strict paranoid)"
+    )
+
+
+def _summary_line(text: str) -> str:
+    for line in text.splitlines():
+        if "certain ·" in line:
+            return line
+    return ""
+
+
+def test_strict_three_levels_listing_exit_and_summary(
+    ka_home, tmp_path, monkeypatch, capsys
+) -> None:
+    tree = tmp_path / "mix"
+    tree.mkdir()
+    (tree / ".env").write_text("API_KEY=placeholder_not_used\n", encoding="utf-8")
+    (tree / "a.py").write_text(f'api_key = "{_GEN_MIXED}"\n', encoding="utf-8")
+    (tree / "b.py").write_text("token = mySecretValue\n", encoding="utf-8")
+    monkeypatch.chdir(tree)
+
+    rc_c = main(["scan", "--no-import", "--strict", "certain"])
+    out_c = capsys.readouterr().out
+    assert rc_c == 1
+    assert "--strict certain" in out_c
+    assert "confidence=certain" in out_c
+    assert "confidence=likely" not in out_c
+    assert "confidence=possible" not in out_c
+
+    rc_h = main(["scan", "--no-import", "--strict", "high"])
+    out_h = capsys.readouterr().out
+    assert rc_h == 1
+    assert "--strict high" in out_h
+    assert "confidence=likely" in out_h
+    assert "confidence=possible" not in out_h
+
+    rc_p = main(["scan", "--no-import", "--strict", "paranoid"])
+    out_p = capsys.readouterr().out
+    assert rc_p == 1
+    assert "--strict paranoid" in out_p
+    assert "confidence=possible" in out_p
+
+    assert _summary_line(out_c) == _summary_line(out_h) == _summary_line(out_p)
+    _assert_no_gen_values(out_c + out_h + out_p)
+
+    rc_j = main(["scan", "--no-import", "--strict", "certain", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["leak_count"] == data["certain_count"]
+    assert "--strict certain" in data["headline"]
+
+
+def test_scan_help_has_strict_wide_not_unreleased_flags(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["scan", "--help"])
+    blob = capsys.readouterr().out + capsys.readouterr().err
+    assert exc.value.code == 0
+    assert "--fail-on" not in blob
+    assert "--show-possible" not in blob
+    assert "--strict" in blob
+    assert "--wide" in blob

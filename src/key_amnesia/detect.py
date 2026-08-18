@@ -189,9 +189,12 @@ class HitSet:
     likely_names: list[str] = field(default_factory=list)
     possible_names: list[str] = field(default_factory=list)
     prefix: str | None = None
+    bearer_likely: bool = False
     bearer_possible: bool = False
     likely_reasons: list[str] = field(default_factory=list)
     possible_reasons: list[str] = field(default_factory=list)
+    likely_reason_counts: dict[str, int] = field(default_factory=dict)
+    possible_reason_counts: dict[str, int] = field(default_factory=dict)
 
     def merge(self, extra: HitSet) -> None:
         seen_l = {n.upper() for n in self.likely_names}
@@ -212,6 +215,8 @@ class HitSet:
             self.possible_names.append(name)
         if extra.prefix and self.prefix is None:
             self.prefix = extra.prefix
+        if extra.bearer_likely:
+            self.bearer_likely = True
         if extra.bearer_possible:
             self.bearer_possible = True
         for reason in extra.likely_reasons:
@@ -220,6 +225,14 @@ class HitSet:
         for reason in extra.possible_reasons:
             if reason not in self.possible_reasons:
                 self.possible_reasons.append(reason)
+        for reason, n in extra.likely_reason_counts.items():
+            self.likely_reason_counts[reason] = (
+                self.likely_reason_counts.get(reason, 0) + n
+            )
+        for reason, n in extra.possible_reason_counts.items():
+            self.possible_reason_counts[reason] = (
+                self.possible_reason_counts.get(reason, 0) + n
+            )
 
 
 def entropy(s: str) -> float:
@@ -377,6 +390,8 @@ def find_secret_kind(text: str) -> str | None:
     hits = scan_text_hits(text)
     if hits.prefix:
         return hits.prefix
+    if hits.bearer_likely:
+        return "Bearer token"
     if hits.likely_names:
         return f"{hits.likely_names[0].upper()} assignment"
     if hits.bearer_possible:
@@ -414,25 +429,24 @@ def iter_secret_keyed_strings(obj: Any) -> Iterator[tuple[str, str]]:
 
 
 def scan_text_hits(text: str) -> HitSet:
-    """Assignment names (likely, possible), prefix kind, bearer-possible flag.
+    """Assignment names (likely, possible), vendor prefix, Bearer flags.
 
     Highest tier wins per name: classify every assignment, keep likely over
-    possible. Prefix kind is high-confidence. Bearer whose value is likely
-    is returned as prefix kind ``Bearer token``. Bearer of an identifier
-    sets the possible flag instead. Never returns values.
+    possible. Vendor prefix is ``certain``. Bearer whose value is likely is
+    ``bearer_likely`` (scan ``likely``). Bearer of an identifier sets
+    ``bearer_possible``. Never returns values.
     """
     hits = HitSet()
     if not text:
         return hits
 
-    prefix = find_prefix_kind(text)
+    hits.prefix = find_prefix_kind(text)
     bearer_tier = classify_bearer_capture(text)
-    if prefix is not None:
-        hits.prefix = prefix
-    elif bearer_tier == "likely":
-        hits.prefix = "Bearer token"
-    elif bearer_tier == "possible":
-        hits.bearer_possible = True
+    if hits.prefix is None:
+        if bearer_tier == "likely":
+            hits.bearer_likely = True
+        elif bearer_tier == "possible":
+            hits.bearer_possible = True
 
     # key -> (tier, original_name, reasons)
     chosen: dict[str, tuple[str, str, list[str]]] = {}
@@ -458,11 +472,17 @@ def scan_text_hits(text: str) -> HitSet:
             for reason in reasons:
                 if reason not in hits.likely_reasons:
                     hits.likely_reasons.append(reason)
+                hits.likely_reason_counts[reason] = (
+                    hits.likely_reason_counts.get(reason, 0) + 1
+                )
         else:
             hits.possible_names.append(name)
             for reason in reasons:
                 if reason not in hits.possible_reasons:
                     hits.possible_reasons.append(reason)
+                hits.possible_reason_counts[reason] = (
+                    hits.possible_reason_counts.get(reason, 0) + 1
+                )
 
     return hits
 
