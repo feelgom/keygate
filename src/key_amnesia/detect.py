@@ -59,9 +59,17 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Literal
 
 Confidence = Literal["none", "possible", "likely"]
+
+# UUID / stripped-hex promotion (hyphenated 8-4-4-4-12 or 32 hex).
+REASON_UUID = "uuid"
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_STRIPPED_UUID_LEN = 32
 
 # --- length / possible-gate (0.4.9 assignment heuristic) -------------------
 # Inherited as the *possible* gate, not the likely-floor. Shannon 3.0 is why
@@ -83,17 +91,24 @@ _HEX_LIKELY = re.compile(rf"[0-9a-fA-F]{{{HEX_LIKELY_MIN_LEN},}}$")
 # and no digits → possible, not likely (named weakening 3).
 MIN_VOWEL_SEGMENTS_FOR_POSSIBLE = 2
 
-# Named weakenings. Hook recall drops only 1–2. Weakening 3 is scan-only
-# (hook still denies). Everything under tests/fixtures/scan_corpus/demoted/
-# must map to weakening 3.
+# Named weakenings. Hook recall drops only function-call and type-annotation
+# (→ none). Identifier, passphrase, and low-transition stay possible so the
+# hook still denies; scan leak_count omits them.
 NAMED_WEAKENING_FUNCTION_CALL = "function-call"
 NAMED_WEAKENING_TYPE_ANNOTATION = "type-annotation"
 NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE = "word-shaped-passphrase"
+NAMED_WEAKENING_IDENTIFIER = "identifier"
+NAMED_WEAKENING_LOW_TRANSITION = "low-transition"
 NAMED_WEAKENINGS: tuple[str, ...] = (
     NAMED_WEAKENING_FUNCTION_CALL,
     NAMED_WEAKENING_TYPE_ANNOTATION,
     NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
+    NAMED_WEAKENING_IDENTIFIER,
+    NAMED_WEAKENING_LOW_TRANSITION,
 )
+
+# Filename demotion (scan only): mcp.json without a recognised top-level key.
+REASON_UNCONFIRMED_MCP = "unconfirmed-mcp-shape"
 
 # Well-known API key / token prefixes (value starts immediately after).
 # Anthropic-style checked before the more general OpenAI-style pattern so the
@@ -167,6 +182,46 @@ _VOWELS = set("aeiouAEIOU")
 _CAMEL_SEGS = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
 
 
+@dataclass
+class HitSet:
+    """Assignment/prefix hits for a text blob. Never carries values."""
+
+    likely_names: list[str] = field(default_factory=list)
+    possible_names: list[str] = field(default_factory=list)
+    prefix: str | None = None
+    bearer_possible: bool = False
+    likely_reasons: list[str] = field(default_factory=list)
+    possible_reasons: list[str] = field(default_factory=list)
+
+    def merge(self, extra: HitSet) -> None:
+        seen_l = {n.upper() for n in self.likely_names}
+        seen_p = {n.upper() for n in self.possible_names}
+        for name in extra.likely_names:
+            key = name.upper()
+            if key in seen_l:
+                continue
+            seen_l.add(key)
+            self.likely_names.append(name)
+            seen_p.discard(key)
+            self.possible_names[:] = [n for n in self.possible_names if n.upper() != key]
+        for name in extra.possible_names:
+            key = name.upper()
+            if key in seen_l or key in seen_p:
+                continue
+            seen_p.add(key)
+            self.possible_names.append(name)
+        if extra.prefix and self.prefix is None:
+            self.prefix = extra.prefix
+        if extra.bearer_possible:
+            self.bearer_possible = True
+        for reason in extra.likely_reasons:
+            if reason not in self.likely_reasons:
+                self.likely_reasons.append(reason)
+        for reason in extra.possible_reasons:
+            if reason not in self.possible_reasons:
+                self.possible_reasons.append(reason)
+
+
 def entropy(s: str) -> float:
     if not s:
         return 0.0
@@ -233,42 +288,71 @@ def _vowel_bearing_segments(value: str) -> int:
     return sum(1 for seg in _word_segments(value) if _has_vowel(seg))
 
 
-def classify_value(value: str) -> Confidence:
-    """Classify a captured assignment/Bearer *value* (never logged)."""
+def _compact_hex(value: str) -> str:
+    return value.replace("-", "")
+
+
+def _is_nil_or_all_zero(value: str) -> bool:
+    compact = _compact_hex(value)
+    return bool(compact) and all(c == "0" for c in compact)
+
+
+def _uuid_or_stripped_hex(value: str) -> bool:
+    """Hyphenated UUID or 32-char hex (stripped UUID). Nil already excluded."""
+    if _UUID_SHAPE.fullmatch(value):
+        return True
+    compact = _compact_hex(value)
+    return len(compact) == _STRIPPED_UUID_LEN and bool(_HEX_LIKELY.fullmatch(compact))
+
+
+def classify_value(value: str) -> tuple[Confidence, str | None]:
+    """Classify a captured assignment/Bearer *value* (never logged).
+
+    Returns ``(tier, reason)``. ``reason`` is a named weakening, ``uuid``,
+    or None. Never returns the value.
+    """
     v = value.strip("'\"")
     if len(v) < MIN_VALUE_LEN:
-        return "none"
-    if is_placeholder(v):
-        return "none"
+        return "none", None
+    if is_placeholder(v) or _is_nil_or_all_zero(v):
+        return "none", None
     if _FUNC_CALL.fullmatch(v):
-        return "none"
+        return "none", NAMED_WEAKENING_FUNCTION_CALL
     if _TYPE_ANN.fullmatch(v):
-        return "none"
+        return "none", NAMED_WEAKENING_TYPE_ANNOTATION
+
+    # UUID-shaped / stripped-hex-32: likely even when hyphens make
+    # transition_rate sit below LIKELY_TRANSITION_FLOOR (~0.43).
+    if _uuid_or_stripped_hex(v):
+        return "likely", REASON_UUID
 
     has_upper = any(c.isupper() for c in v)
     has_lower = any(c.islower() for c in v)
     has_digit = any(c.isdigit() for c in v)
     mixed = sum([has_upper, has_lower, has_digit]) >= 2
     if not mixed:
-        return "none"
+        return "none", None
     if entropy(v) < SHANNON_POSSIBLE_FLOOR:
-        return "none"
+        return "none", None
 
-    # Named weakening 3: word-shaped, no digits → possible (hook still denies).
+    # Word-shaped / identifier, no digits → possible (hook still denies).
     if not has_digit and _vowel_bearing_segments(v) >= MIN_VOWEL_SEGMENTS_FOR_POSSIBLE:
-        return "possible"
+        if v[:1].isupper():
+            return "possible", NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE
+        return "possible", NAMED_WEAKENING_IDENTIFIER
 
-    if _HEX_LIKELY.fullmatch(v):
-        return "likely"
+    compact = _compact_hex(v)
+    if _HEX_LIKELY.fullmatch(compact):
+        return "likely", None
 
     if transition_rate(v) >= LIKELY_TRANSITION_FLOOR:
-        return "likely"
-    return "possible"
+        return "likely", None
+    return "possible", NAMED_WEAKENING_LOW_TRANSITION
 
 
 def assignment_is_secret(value: str) -> bool:
     """0.4.9 hook meaning: possible or likely (not none)."""
-    return classify_value(value) in ("possible", "likely")
+    return classify_value(value)[0] in ("possible", "likely")
 
 
 def find_prefix_kind(text: str) -> str | None:
@@ -282,22 +366,23 @@ def classify_bearer_capture(text: str) -> Confidence:
     match = BEARER.search(text)
     if not match:
         return "none"
-    return classify_value(match.group(1))
+    return classify_value(match.group(1))[0]
 
 
 def find_secret_kind(text: str) -> str | None:
-    """Human-readable kind if possible|likely|prefix, else None. No values."""
-    prefix = find_prefix_kind(text)
-    if prefix:
-        return prefix
+    """Human-readable kind if possible|likely|prefix, else None. No values.
 
-    bearer_tier = classify_bearer_capture(text)
-    if bearer_tier in ("possible", "likely"):
+    Order: vendor prefix, then likely (incl. Bearer-likely), then possible.
+    """
+    hits = scan_text_hits(text)
+    if hits.prefix:
+        return hits.prefix
+    if hits.likely_names:
+        return f"{hits.likely_names[0].upper()} assignment"
+    if hits.bearer_possible:
         return "Bearer token"
-
-    for match in ASSIGN.finditer(text):
-        if classify_value(match.group("value")) in ("possible", "likely"):
-            return f"{match.group('name').upper()} assignment"
+    if hits.possible_names:
+        return f"{hits.possible_names[0].upper()} assignment"
     return None
 
 
@@ -328,43 +413,58 @@ def iter_secret_keyed_strings(obj: Any) -> Iterator[tuple[str, str]]:
             yield from iter_secret_keyed_strings(item)
 
 
-def scan_text_hits(
-    text: str,
-) -> tuple[list[str], list[str], str | None, bool]:
+def scan_text_hits(text: str) -> HitSet:
     """Assignment names (likely, possible), prefix kind, bearer-possible flag.
 
-    Prefix kind is high-confidence. Bearer whose value is likely is returned
-    as prefix kind ``Bearer token``. Bearer of an identifier sets the
-    possible flag instead. Never returns values.
+    Highest tier wins per name: classify every assignment, keep likely over
+    possible. Prefix kind is high-confidence. Bearer whose value is likely
+    is returned as prefix kind ``Bearer token``. Bearer of an identifier
+    sets the possible flag instead. Never returns values.
     """
+    hits = HitSet()
     if not text:
-        return [], [], None, False
+        return hits
 
     prefix = find_prefix_kind(text)
     bearer_tier = classify_bearer_capture(text)
-    bearer_possible = False
-    if prefix is None and bearer_tier == "likely":
-        prefix = "Bearer token"
-    elif prefix is None and bearer_tier == "possible":
-        bearer_possible = True
+    if prefix is not None:
+        hits.prefix = prefix
+    elif bearer_tier == "likely":
+        hits.prefix = "Bearer token"
+    elif bearer_tier == "possible":
+        hits.bearer_possible = True
 
-    likely_names: list[str] = []
-    possible_names: list[str] = []
-    seen: set[str] = set()
+    # key -> (tier, original_name, reasons)
+    chosen: dict[str, tuple[str, str, list[str]]] = {}
     for match in ASSIGN.finditer(text):
         name = match.group("name")
         key = name.upper()
-        if key in seen:
+        tier, reason = classify_value(match.group("value"))
+        if tier not in ("likely", "possible"):
             continue
-        tier = classify_value(match.group("value"))
-        if tier == "likely":
-            seen.add(key)
-            likely_names.append(name)
-        elif tier == "possible":
-            seen.add(key)
-            possible_names.append(name)
+        prev = chosen.get(key)
+        if prev is None:
+            chosen[key] = (tier, name, [reason] if reason else [])
+            continue
+        prev_tier, _prev_name, prev_reasons = prev
+        if prev_tier == "possible" and tier == "likely":
+            chosen[key] = (tier, name, [reason] if reason else [])
+        elif prev_tier == tier and reason and reason not in prev_reasons:
+            prev_reasons.append(reason)
 
-    return likely_names, possible_names, prefix, bearer_possible
+    for tier, name, reasons in chosen.values():
+        if tier == "likely":
+            hits.likely_names.append(name)
+            for reason in reasons:
+                if reason not in hits.likely_reasons:
+                    hits.likely_reasons.append(reason)
+        else:
+            hits.possible_names.append(name)
+            for reason in reasons:
+                if reason not in hits.possible_reasons:
+                    hits.possible_reasons.append(reason)
+
+    return hits
 
 
 def looks_like_json_container(s: str) -> bool:

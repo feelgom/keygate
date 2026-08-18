@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from key_amnesia.detect import (
+    REASON_UNCONFIRMED_MCP,
+    HitSet,
     classify_value,
     collect_strings,
     iter_secret_keyed_strings,
@@ -146,6 +148,8 @@ class Finding:
     hit_lines: list[int] = field(default_factory=list)
     # "high" = leak_count / default exit; "possible" = identifier/passphrase.
     confidence: str = "high"
+    # Named reason codes (never values): uuid, low-transition, identifier, …
+    reasons: list[str] = field(default_factory=list)
 
 
 def _is_dotenv_filename(name: str) -> bool:
@@ -256,8 +260,8 @@ def scan_text_for_leaks(text: str) -> tuple[list[str], str | None]:
     """
     if not text:
         return [], None
-    likely, _possible, prefix, _bp = scan_text_hits(text)
-    return likely, prefix
+    hits = scan_text_hits(text)
+    return hits.likely_names, hits.prefix
 
 
 def _strings_from_decoded_json(obj: Any) -> list[str]:
@@ -276,79 +280,50 @@ def _strings_from_decoded_json(obj: Any) -> list[str]:
     return out
 
 
-def _merge_hits(
-    likely: list[str],
-    possible: list[str],
-    prefix: str | None,
-    bearer_possible: bool,
-    extra_likely: list[str],
-    extra_possible: list[str],
-    extra_prefix: str | None,
-    extra_bp: bool,
-) -> tuple[list[str], list[str], str | None, bool]:
-    seen_l = {n.upper() for n in likely}
-    seen_p = {n.upper() for n in possible}
-    for name in extra_likely:
-        key = name.upper()
-        if key in seen_l:
+def _apply_secret_keys(acc: HitSet, node: Any) -> None:
+    """Classify secret-named dict keys that never appear as ASSIGN text."""
+    for key, val in iter_secret_keyed_strings(node):
+        extra = HitSet()
+        tier, reason = classify_value(val)
+        if tier == "likely":
+            extra.likely_names = [key]
+            if reason:
+                extra.likely_reasons = [reason]
+        elif tier == "possible":
+            extra.possible_names = [key]
+            if reason:
+                extra.possible_reasons = [reason]
+        else:
             continue
-        seen_l.add(key)
-        likely.append(name)
-        seen_p.discard(key)
-        possible[:] = [n for n in possible if n.upper() != key]
-    for name in extra_possible:
-        key = name.upper()
-        if key in seen_l or key in seen_p:
-            continue
-        seen_p.add(key)
-        possible.append(name)
-    if extra_prefix and prefix is None:
-        prefix = extra_prefix
-    if extra_bp:
-        bearer_possible = True
-    return likely, possible, prefix, bearer_possible
+        acc.merge(extra)
 
 
-def _scan_transcript_payload(
-    obj: Any,
-) -> tuple[list[str], list[str], str | None, bool]:
+def _scan_transcript_payload(obj: Any) -> HitSet:
     """Run detectors on string payloads and secret-named JSON keys.
 
-    Returns likely names, possible names, prefix kind, bearer-possible.
-    Never returns values.
+    String scan unwraps one nested JSON string via ``_strings_from_decoded_json``
+    and does not re-walk those strings. Secret-key walk still covers dict keys
+    that never appear as ASSIGN text (including keys inside the unwrapped
+    object). Never returns values.
     """
-    likely: list[str] = []
-    possible: list[str] = []
-    prefix: str | None = None
-    bearer_possible = False
+    acc = HitSet()
+    nested_objs: list[Any] = []
+    for s in collect_strings(obj):
+        if looks_like_json_container(s):
+            try:
+                nested = json.loads(s)
+            except json.JSONDecodeError:
+                nested = None
+            if isinstance(nested, (dict, list)):
+                nested_objs.append(nested)
 
-    def _apply_obj(node: Any) -> None:
-        nonlocal likely, possible, prefix, bearer_possible
-        for s in _strings_from_decoded_json(node):
-            ln, pn, pref, bp = scan_text_hits(s)
-            likely, possible, prefix, bearer_possible = _merge_hits(
-                likely, possible, prefix, bearer_possible, ln, pn, pref, bp
-            )
-        for key, val in iter_secret_keyed_strings(node):
-            tier = classify_value(val)
-            if tier == "likely":
-                likely, possible, prefix, bearer_possible = _merge_hits(
-                    likely, possible, prefix, bearer_possible, [key], [], None, False
-                )
-            elif tier == "possible":
-                likely, possible, prefix, bearer_possible = _merge_hits(
-                    likely, possible, prefix, bearer_possible, [], [key], None, False
-                )
-            if looks_like_json_container(val):
-                try:
-                    nested = json.loads(val)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(nested, (dict, list)):
-                    _apply_obj(nested)
+    for s in _strings_from_decoded_json(obj):
+        acc.merge(scan_text_hits(s))
 
-    _apply_obj(obj)
-    return likely, possible, prefix, bearer_possible
+    _apply_secret_keys(acc, obj)
+    for nested in nested_objs:
+        _apply_secret_keys(acc, nested)
+    return acc
 
 
 def iter_agent_transcript_files(home: Path | None = None) -> Iterable[Path]:
@@ -408,13 +383,11 @@ def _inline_findings(
     possible_reason: str,
 ) -> list[Finding]:
     """Split content hits into high vs possible findings. Never includes values."""
-    likely_names, possible_names, prefix, bearer_possible = scan_text_hits(text)
-    if path.suffix.lower() == ".md":
-        # Assignment-only hits in docs are not likely; prefix hits still count.
-        for name in likely_names:
-            if name.upper() not in {n.upper() for n in possible_names}:
-                possible_names.append(name)
-        likely_names = []
+    hits = scan_text_hits(text)
+    likely_names = hits.likely_names
+    possible_names = hits.possible_names
+    prefix = hits.prefix
+    bearer_possible = hits.bearer_possible
 
     out: list[Finding] = []
     if likely_names or prefix:
@@ -434,6 +407,7 @@ def _inline_findings(
                 importable=False,
                 scope=scope,
                 confidence="high",
+                reasons=list(hits.likely_reasons),
             )
         )
     if possible_names or bearer_possible:
@@ -449,6 +423,7 @@ def _inline_findings(
                 importable=False,
                 scope=scope,
                 confidence="possible",
+                reasons=list(hits.possible_reasons),
             )
         )
     return out
@@ -467,6 +442,8 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
     possible_lines: list[int] = []
     high_names: list[str] = []
     possible_names: list[str] = []
+    high_reasons: list[str] = []
+    possible_reasons: list[str] = []
     seen_high: set[str] = set()
     seen_possible: set[str] = set()
 
@@ -480,9 +457,11 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                likely, possible, prefix, bearer_possible = _scan_transcript_payload(
-                    obj
-                )
+                hits = _scan_transcript_payload(obj)
+                likely = hits.likely_names
+                possible = hits.possible_names
+                prefix = hits.prefix
+                bearer_possible = hits.bearer_possible
                 high = bool(likely or prefix)
                 poss = bool(possible or bearer_possible)
                 if not high and not poss:
@@ -495,14 +474,24 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
                             continue
                         seen_high.add(key)
                         high_names.append(name)
-                elif poss:
-                    possible_lines.append(line_no)
+                    for reason in hits.likely_reasons:
+                        if reason not in high_reasons:
+                            high_reasons.append(reason)
+                # Mixed high+possible lines stay high-only for hit_lines /
+                # transcript_line_hit_count, but possible names/reasons are
+                # still recorded so histograms stay complete.
+                if poss:
+                    if not high:
+                        possible_lines.append(line_no)
                     for name in possible:
                         key = name.upper()
                         if key in seen_possible or key in seen_high:
                             continue
                         seen_possible.add(key)
                         possible_names.append(name)
+                    for reason in hits.possible_reasons:
+                        if reason not in possible_reasons:
+                            possible_reasons.append(reason)
     except OSError:
         return []
 
@@ -523,23 +512,33 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
                 scope=scope,
                 hit_lines=high_lines,
                 confidence="high",
+                reasons=high_reasons,
             )
         )
-    if possible_lines:
+    if possible_lines or possible_names:
+        count = len(possible_lines) if possible_lines else max(len(possible_names), 1)
+        if possible_lines:
+            poss_reason = (
+                f"agent session transcript: {len(possible_lines)} line(s) with "
+                "possible identifier- or passphrase-shaped content"
+            )
+        else:
+            poss_reason = (
+                "agent session transcript: possible identifier- or "
+                "passphrase-shaped names on high-confidence lines"
+            )
         out.append(
             Finding(
                 path=str(path),
                 kind="agent_session_transcript",
                 secret_names=possible_names,
-                secret_count=len(possible_lines),
-                reason=(
-                    f"agent session transcript: {len(possible_lines)} line(s) with "
-                    "possible identifier- or passphrase-shaped content"
-                ),
+                secret_count=count,
+                reason=poss_reason,
                 importable=False,
                 scope=scope,
                 hit_lines=possible_lines,
                 confidence="possible",
+                reasons=possible_reasons,
             )
         )
     return out
@@ -562,7 +561,37 @@ def _findings_for_path(path: Path, *, scope: str) -> list[Finding]:
         elif kind == "mcp_config":
             names = _json_key_names(path)
             count = max(len(names), 1)
-            reason = f"MCP config ({count} top-level key name(s))"
+            confirmed = any(k in ("mcpServers", "servers") for k in names)
+            if confirmed:
+                return [
+                    Finding(
+                        path=str(path),
+                        kind=kind,
+                        secret_names=names,
+                        secret_count=count,
+                        reason=f"MCP config ({count} top-level key name(s))",
+                        importable=False,
+                        scope=scope,
+                        confidence="high",
+                    )
+                ]
+            # Unrecognised shape: demote to possible, do not drop.
+            return [
+                Finding(
+                    path=str(path),
+                    kind=kind,
+                    secret_names=names,
+                    secret_count=count,
+                    reason=(
+                        "unconfirmed MCP config shape (no top-level "
+                        "mcpServers/servers)"
+                    ),
+                    importable=False,
+                    scope=scope,
+                    confidence="possible",
+                    reasons=[REASON_UNCONFIRMED_MCP],
+                )
+            ]
         elif kind in (".npmrc", ".pypirc"):
             reason = f"{kind} (may contain registry auth tokens)"
         elif kind == "ssh_private_key":

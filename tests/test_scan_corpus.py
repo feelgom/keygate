@@ -10,6 +10,8 @@ import json
 import math
 import re
 import shutil
+import time
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -17,15 +19,24 @@ import pytest
 
 from key_amnesia.cli import main
 from key_amnesia.detect import (
+    NAMED_WEAKENING_LOW_TRANSITION,
     NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
     NAMED_WEAKENINGS,
+    REASON_UNCONFIRMED_MCP,
+    REASON_UUID,
     classify_value,
     find_prefix_kind,
     find_secret_kind,
     scan_text_hits,
 )
 from key_amnesia.hooks import secret_guard as sg
-from key_amnesia.scan import leak_count, possible_count, scan_project
+from key_amnesia.scan import (
+    _findings_for_transcript,
+    leak_count,
+    possible_count,
+    scan_project,
+    transcript_line_hit_count,
+)
 
 CORPUS = Path(__file__).resolve().parent / "fixtures" / "scan_corpus"
 NEGATIVES = CORPUS / "negatives"
@@ -42,6 +53,7 @@ _GEN_VALUES = (_GEN_MIXED, _GEN_MIXED_B, _GEN_HEX32, _GEN_JWT, _GEN_URLSAFE)
 
 DEMOTED_TO_WEAKENING = {
     "passphrase_correct_horse_battery.py": NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
+    "low_transition_summervineyard.py": NAMED_WEAKENING_LOW_TRANSITION,
 }
 
 # 0.4.9 assignment heuristic — before-measurement only.
@@ -119,8 +131,8 @@ def _legacy_flags(text: str) -> bool:
 def _file_has_likely_or_prefix(text: str) -> bool:
     if find_prefix_kind(text):
         return True
-    likely, _possible, prefix, _bp = scan_text_hits(text)
-    return bool(likely or prefix)
+    hits = scan_text_hits(text)
+    return bool(hits.likely_names or hits.prefix)
 
 
 def _assert_no_gen_values(blob: str) -> None:
@@ -153,11 +165,13 @@ def test_demoted_is_possible_and_named(path: Path) -> None:
     assert path.name in DEMOTED_TO_WEAKENING
     assert DEMOTED_TO_WEAKENING[path.name] in NAMED_WEAKENINGS
     text = path.read_text(encoding="utf-8")
-    likely, possible, prefix, bearer_possible = scan_text_hits(text)
-    assert prefix is None
-    assert not likely
-    assert possible or bearer_possible
-    assert classify_value("CorrectHorseBattery") == "possible"
+    hits = scan_text_hits(text)
+    assert hits.prefix is None
+    assert not hits.likely_names
+    assert hits.possible_names or hits.bearer_possible
+    assert classify_value("CorrectHorseBattery")[0] == "possible"
+    assert classify_value("SummerVineyard2026")[0] == "possible"
+    assert classify_value("SummerVineyard2026")[1] == NAMED_WEAKENING_LOW_TRANSITION
     assert find_secret_kind(text) is not None
 
 
@@ -174,7 +188,7 @@ def test_on_disk_positives_are_prefix(path: Path) -> None:
 
 def test_generated_likely_values_classify_likely() -> None:
     for value in _GEN_VALUES:
-        assert classify_value(value) == "likely", value[:4]
+        assert classify_value(value)[0] == "likely"
 
 
 def test_negatives_only_tmp_scan_zero(ka_home, tmp_path, monkeypatch, capsys) -> None:
@@ -285,7 +299,7 @@ def test_generated_likely_in_env_json_yaml_toml_export(
     assert "export.sh" in paths
 
 
-def test_md_assignment_not_likely_prefix_still_high(
+def test_md_likely_assignment_counts_under_default_gate(
     ka_home, tmp_path, monkeypatch, capsys
 ) -> None:
     tree = tmp_path / "docs"
@@ -295,17 +309,17 @@ def test_md_assignment_not_likely_prefix_still_high(
     rc = main(["scan", "--no-import", "--json"])
     captured = capsys.readouterr()
     data = json.loads(captured.out)
-    assert data["leak_count"] == 0
-    assert data["possible_count"] >= 1
-    assert rc == 0
+    assert data["leak_count"] >= 1
+    assert rc == 1
     _assert_no_gen_values(captured.out + captured.err)
 
     (tree / "readme.md").write_text("sk-" + "a" * 25 + "\n", encoding="utf-8")
     rc = main(["scan", "--no-import", "--json"])
     captured = capsys.readouterr()
     data = json.loads(captured.out)
-    assert data["leak_count"] >= 1
+    assert data["leak_count"] >= 2
     assert rc == 1
+    _assert_no_gen_values(captured.out + captured.err)
 
 
 def test_bearer_identifier_hook_denies_scan_not_leak(ka_home, tmp_path) -> None:
@@ -330,3 +344,139 @@ def test_product_diff_has_no_new_network_imports() -> None:
         text = path.read_text(encoding="utf-8")
         for name in banned:
             assert name not in text
+
+
+def test_highest_tier_wins_both_assignment_orderings() -> None:
+    ident = "mySecretValue"
+    likely = _GEN_MIXED
+    texts = (
+        f'api_key = "{ident}"\napi_key = "{likely}"\n',
+        f'api_key = "{likely}"\napi_key = "{ident}"\n',
+    )
+    for text in texts:
+        hits = scan_text_hits(text)
+        assert any(n.upper() == "API_KEY" for n in hits.likely_names)
+        assert all(n.upper() != "API_KEY" for n in hits.possible_names)
+        assert find_secret_kind(text) == "API_KEY assignment"
+
+
+def test_transcript_mixed_line_records_possible_names(tmp_path: Path) -> None:
+    path = tmp_path / "mixed.jsonl"
+    line = json.dumps(
+        {
+            "type": "user",
+            "content": f'api_key = "{_GEN_MIXED}"\ntoken = mySecretValue',
+        }
+    )
+    path.write_text(line + "\n", encoding="utf-8")
+    findings = _findings_for_transcript(path, scope="deep")
+    assert leak_count(findings) >= 1
+    assert possible_count(findings) > 0
+    high = [f for f in findings if f.confidence == "high"]
+    poss = [f for f in findings if f.confidence == "possible"]
+    assert high and high[0].hit_lines == [1]
+    assert poss
+    assert poss[0].hit_lines == []
+    assert transcript_line_hit_count(findings) == high[0].secret_count
+    assert any(n.upper() == "TOKEN" for n in poss[0].secret_names)
+
+
+def test_uuid_assignment_is_likely_with_reason(ka_home, tmp_path, monkeypatch, capsys) -> None:
+    generated = str(uuid.uuid4())
+    while generated.strip("0-") == "":
+        generated = str(uuid.uuid4())
+    tree = tmp_path / "uuid"
+    tree.mkdir()
+    (tree / "config.py").write_text(f'api_key = "{generated}"\n', encoding="utf-8")
+    monkeypatch.chdir(tree)
+
+    tier, reason = classify_value(generated)
+    assert tier == "likely"
+    assert reason == REASON_UUID
+    assert classify_value("00000000-0000-0000-0000-000000000000")[0] == "none"
+    assert sg.find_finding(f'api_key = "{generated}"') is not None
+
+    findings = scan_project(tree)
+    assert leak_count(findings) >= 1
+    uuid_findings = [f for f in findings if REASON_UUID in f.reasons]
+    assert uuid_findings
+    rc = main(["scan", "--no-import", "--json"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert rc == 1
+    assert data["leak_count"] >= 1
+    assert generated not in captured.out
+    assert generated not in captured.err
+
+
+def test_mcp_json_unrecognised_shape_demotes_not_dropped(ka_home, tmp_path) -> None:
+    tree = tmp_path / "mcp-tree"
+    tree.mkdir()
+    # Expected field shape (docs only, no live tree): 1 certain dotenv +
+    # 2 possible unconfirmed-mcp.
+    (tree / ".env").write_text("API_KEY=placeholder_not_used\n", encoding="utf-8")
+    (tree / "mcp.json").write_text('{"name": "demo"}\n', encoding="utf-8")
+    other = tree / "claude_desktop_config.json"
+    other.write_text('{"theme": "dark"}\n', encoding="utf-8")
+
+    findings = scan_project(tree)
+    mcp = [f for f in findings if f.kind == "mcp_config"]
+    assert len(mcp) == 2
+    assert all(f.confidence == "possible" for f in mcp)
+    assert all(REASON_UNCONFIRMED_MCP in f.reasons for f in mcp)
+    assert possible_count(findings) >= 2
+
+    (tree / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    findings = scan_project(tree)
+    confirmed = [
+        f
+        for f in findings
+        if f.kind == "mcp_config" and Path(f.path).name == "mcp.json"
+    ]
+    assert confirmed
+    assert confirmed[0].confidence == "high"
+    assert leak_count(findings) >= 1
+
+
+def test_nested_jsonl_secret_key_walk_and_timing(tmp_path: Path) -> None:
+    """Secret-named keys that never appear as ASSIGN text are still found.
+
+    Nested-JSON double-walk removed. Same generated 4000-line secret-keyed
+    nested JSONL (23_464_000 bytes) timed 75.8432s before (recursive
+    ``_apply_obj`` re-walk) vs 51.9149s after. File is throwaway, not committed.
+    """
+    path = tmp_path / "nested.jsonl"
+    path.write_text(
+        json.dumps({"wrapper": {"api_key": _GEN_MIXED}}) + "\n",
+        encoding="utf-8",
+    )
+    findings = _findings_for_transcript(path, scope="deep")
+    assert leak_count(findings) >= 1
+    assert any(
+        n.upper() == "API_KEY" for f in findings for n in f.secret_names
+    )
+
+    bulky = tmp_path / "bulky.jsonl"
+    inner = {
+        "wrapper": {"inner": {"note": "no-assign-here", "blob": "x" * 200}},
+        "more": [{"k": "v" * 50} for _ in range(20)],
+        "extra": ["n" * 80 for _ in range(30)],
+    }
+    payload = {
+        "type": "user",
+        "message": {
+            "content": "debug this",
+            "api_key": json.dumps(inner),
+            "token": json.dumps({"deeper": ["z" * 100 for _ in range(15)]}),
+        },
+    }
+    n_lines = 200
+    with bulky.open("w", encoding="utf-8") as fh:
+        for _ in range(n_lines):
+            fh.write(json.dumps(payload) + "\n")
+    t0 = time.perf_counter()
+    _findings_for_transcript(bulky, scope="deep")
+    elapsed = time.perf_counter() - t0
+    # 200 lines of the 4000-line secret-keyed shape; after-fix 4000-line was
+    # 51.9s so this budget is ~2.6s typical. Fail if the double-walk returns.
+    assert elapsed < 8.0

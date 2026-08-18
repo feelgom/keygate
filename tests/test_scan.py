@@ -428,7 +428,7 @@ def test_scan_deep_agent_transcripts_line_hits(
     assert copilot_f.hit_lines == [1]
 
     assert transcript_line_hit_count(findings) == sum(
-        f.secret_count for f in transcripts
+        f.secret_count for f in transcripts if f.confidence == "high"
     )
     blob = json.dumps([f.__dict__ for f in findings])
     _assert_no_planted(blob)
