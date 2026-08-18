@@ -1,0 +1,3 @@
+{"type":"user","message":{"content":"token = secrets.token_hex(8)"}}
+{"type":"user","message":{"content":"secret = mySecretValue"}}
+{"toolUse":"{\"command\":\"TOKEN=changeme\"}"}

@@ -53,7 +53,10 @@ def test_scan_finds_dotenv_names_not_values(ka_home, project_dir, capsys) -> Non
 
     assert rc == 1
     assert data["leak_count"] == 2
+    assert data["possible_count"] == 0
+    assert data["findings"][0]["confidence"] == "high"
     assert "LEAK" in data["headline"]
+    assert "high-confidence" in data["headline"]
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE_2 not in captured.out
     assert SECRET_VALUE not in captured.err
@@ -72,7 +75,8 @@ def test_scan_clean_tree_exits_zero(ka_home, project_dir, capsys) -> None:
     out = capsys.readouterr().out
 
     assert rc == 0
-    assert "0 LEAK" in out or "0 LEAKs" in out
+    assert "high-confidence" in out
+    assert "LEAK" in out
 
 
 def test_scan_excludes_node_modules_and_venv_by_default(
@@ -170,7 +174,7 @@ def test_scan_headline_wording() -> None:
         )
     ]
     text = headline(findings)
-    assert text.startswith("2 LEAKs found")
+    assert text.startswith("2 high-confidence LEAKs found")
     assert "your agent can read 2 secrets" in text
     assert "Locally Exposed Agent Keys" in text
 

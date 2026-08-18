@@ -211,6 +211,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON instead of human text",
     )
     p_scan.add_argument(
+        "--fail-on",
+        choices=("high", "possible"),
+        default="high",
+        help=(
+            "Exit 1 when this class of findings is present. "
+            "high (default): high-confidence only. "
+            "possible: also fail on identifier/passphrase-shaped hits"
+        ),
+    )
+    p_scan.add_argument(
+        "--show-possible",
+        action="store_true",
+        help=(
+            "Include possible (identifier- or passphrase-shaped) hits in "
+            "the human report. --json always includes them"
+        ),
+    )
+    p_scan.add_argument(
         "--yes",
         action="store_true",
         help=(
@@ -1075,8 +1093,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     Default exclusions skip ``node_modules``, ``.venv``/``venv``, common
     build dirs, and ``.git`` internals. ``--deep`` adds home/shell/MCP
     paths and known agent session transcript JSONL trees. Never prints
-    secret values. Detection is advisory (regex+entropy). Non-zero exit
-    if any LEAK count > 0.
+    secret values. Headline and default exit count high-confidence
+    findings only; ``--fail-on possible`` restores the older gate.
     Optionally offers to store selected dotenv findings into the project
     vault via the shared ``dotenv_import`` core.
     """
@@ -1095,6 +1113,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 seen.add(f.path)
 
     as_json = bool(getattr(args, "json", False))
+    show_possible = bool(getattr(args, "show_possible", False))
     if as_json:
         theme.out(
             json.dumps(
@@ -1106,11 +1125,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
             + "\n"
         )
     else:
-        theme.out(scan_mod.format_human_report(findings, project_root=project_root))
+        theme.out(
+            scan_mod.format_human_report(
+                findings,
+                project_root=project_root,
+                show_possible=show_possible,
+            )
+        )
         theme.out("")
 
     n = scan_mod.leak_count(findings)
-    exit_code = 1 if n > 0 else 0
+    p = scan_mod.possible_count(findings)
+    fail_on = getattr(args, "fail_on", "high") or "high"
+    if fail_on == "possible":
+        exit_code = 1 if (n > 0 or p > 0) else 0
+    else:
+        exit_code = 1 if n > 0 else 0
 
     # JSON / --no-import: report only. Interactive offer otherwise.
     if as_json or getattr(args, "no_import", False):

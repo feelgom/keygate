@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.9`.
+Versions follow the git tags `0.4.0` … `0.4.10`.
+
+## [0.4.10] — 2026-08-17
+
+### Behavior change
+
+- `ka scan` exit 1 now means **high-confidence** findings only (`likely` assignment values, vendor prefixes, and filename hits such as `.env`). Trees that exited 1 on identifier / function-call / doc-assignment hits now exit **0**. Use `ka scan --fail-on possible` to restore the older gate (also the CI opt-in for word-shaped passphrases). Invalid `--fail-on` exits 2.
+
+Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-threshold assignment hit (English identifiers, `token = secrets.token_hex(8)`, this repo’s own typed annotations). The headline is high-confidence only; identifier- and passphrase-shaped hits are a separate `possible_count` (`--json` always; `--show-possible` for human).
+
+### Added
+
+- Shared detector module (`key_amnesia.detect`) with explicit tiers: `none` / `possible` / `likely` / `prefix`. Hook still denies `possible|likely|prefix` except function-call and `Name[...]` type-annotation values.
+- `ka scan --fail-on {high,possible}` (default `high`) and `--show-possible`.
+- Quoted-name assignments (`"api_key": "…"`) and JSON key walk for transcripts.
+
+### Changed
+
+- Human headline: `N high-confidence LEAK` plus one secondary sentence with the possible count and passphrase caveat — not a path dump of possibles.
 
 ## [0.4.9] — 2026-08-17
 

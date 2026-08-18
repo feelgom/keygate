@@ -26,6 +26,7 @@ Find plaintext with:
 ```bash
 ka scan
 ka scan --no-import   # report only
+ka scan --fail-on possible   # old-strictness CI gate
 ```
 
 The headline looks like: `N LEAK found — your agent can read N secrets in

@@ -35,7 +35,10 @@ Reports Locally Exposed Agent Keys — filenames and light patterns. Default
 exclusions skip `node_modules`, `.venv`/`venv`, common build dirs, and
 `.git` internals (`--include-excluded` to include). Git-history scanning is
 **not** a feature of the default path (or of this tool's advertised
-workflow).
+workflow). The headline and default exit count **high-confidence** hits
+only. Identifier- and word-shaped-passphrase hits are `possible`
+(`--fail-on possible` to gate; `--show-possible` to list paths). Values are
+never printed.
 
 After the human report, an interactive TTY may offer to store selected
 importable dotenv hits into the project vault (password still required).
@@ -46,6 +49,8 @@ ka scan
 ka scan --no-import   # report only; never offer vault import
 ka scan --deep        # + home/shell/MCP paths
 ka scan --json        # machine-readable; report-only
+ka scan --fail-on possible   # also exit 1 on identifier/passphrase-shaped hits
+ka scan --show-possible      # list possible paths in the human report
 ka scan --yes         # import all importable dotenv hits (password still required)
 ```
 

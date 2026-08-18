@@ -44,10 +44,12 @@ ka init --project                 # or: ka init  for a global vault
 ka import .env                    # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
 ka scan --deep                    # also home/shell/MCP + agent session transcripts
+ka scan --fail-on possible        # also exit 1 on identifier/passphrase-shaped hits
+
 ka run --secret API_KEY -- python my_script.py
 ```
 
-`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. Detection is **advisory** (the same regex + entropy heuristics as the secret-guard hook): false positives and false negatives are expected. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`.
+`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. The headline and default exit count **high-confidence** findings only (vendor prefixes, likely assignment values, sensitive filenames). Identifier- and word-shaped-passphrase hits are `possible`: they appear as a count in the human report (`--show-possible` to list paths; `--fail-on possible` to gate). Detection is **advisory**. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`.
 
 `ka init` asks for the master password twice; if the entries do not match, nothing is created. **There is no recovery** if you forget that password — Argon2id + SecretBox leave none by design.
 

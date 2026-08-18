@@ -39,7 +39,7 @@ ka run --secret NAME --as NAME=ENVVAR -- <command> [args...]
 | `ka status` / `ka connect` | Yes | Session metadata; check first |
 | `ka list` | Yes | Names only; no password |
 | `ka run --secret NAME [--as NAME=ENVVAR] -- ...` | Yes | Primary path; may prompt the human |
-| `ka scan` / `ka scan --no-import` | Yes | Names/paths only; never values |
+| `ka scan` / `ka scan --no-import` | Yes | Names/paths/counts only; never values. Default exit is high-confidence only (`--fail-on possible` for the older gate) |
 | `ka check` | Yes | Manifest vs project names sidecar |
 | Reading vault files / inventing a get-value verb | **No** | Guard has no value-return verb |
 

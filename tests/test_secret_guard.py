@@ -415,3 +415,26 @@ def test_find_finding_ka_safe_skips_prefix_but_trailing_scan_does_not() -> None:
     trailing = "python deploy.py --api-key " + "sk-ant-" + "a" * 25
     assert sg.find_finding(prefix + " " + trailing) is None  # _KA_SAFE on full text
     assert sg.find_finding(trailing, ignore_ka_safe=True) is not None
+
+
+def test_function_call_assignment_allowed() -> None:
+    assert sg.find_finding("token = secrets.token_hex(8)") is None
+    assert sg.find_finding("new_token = secrets_mod.token_urlsafe(32)") is None
+    assert sg.find_finding("Token = GetTokenFromCache()") is None
+
+
+def test_type_annotation_allowed() -> None:
+    assert sg.find_finding("token: Optional[str]") is None
+
+
+def test_json_quoted_key_likely_denied() -> None:
+    text = '{"api_key": "aB3xQ9mK2pL7vN4wZ8"}'
+    finding = sg.find_finding(text)
+    assert finding is not None
+    assert "assignment" in finding
+
+
+def test_passphrase_still_hook_denied() -> None:
+    assert sg.find_finding("export PASSWORD=CorrectHorseBattery") is not None
+    assert sg.find_finding("secret = CorrectHorseBattery") is not None
+
