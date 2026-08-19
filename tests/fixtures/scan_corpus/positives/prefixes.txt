@@ -1,0 +1,11 @@
+# Prefix positives: repeated a/0 construction (same as KNOWN_PREFIX_SAMPLES).
+# Not a .env file. Low entropy; partner secret-scanning patterns should not fire.
+sk-aaaaaaaaaaaaaaaaaaaaaaaaa
+sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaa
+AKIA0000000000000000
+ghp_aaaaaaaaaaaaaaaaaaaaaaaaa
+github_pat_aaaaaaaaaaaaaaaaaaaaaaaaa
+glpat-aaaaaaaaaaaaaaaaaaaaaaaaa
+xoxb-aaaaaaaaaaaaaaaaaaaaaaaaa
+AIzaaaaaaaaaaaaaaaaaaaaaaaaaa
+npm_aaaaaaaaaaaaaaaaaaaaaaaaa

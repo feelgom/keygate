@@ -53,7 +53,14 @@ def test_scan_finds_dotenv_names_not_values(ka_home, project_dir, capsys) -> Non
 
     assert rc == 1
     assert data["leak_count"] == 2
+    assert data["possible_count"] == 0
+    assert data["certain_count"] == 2
+    assert data["likely_count"] == 0
+    assert data["findings"][0]["confidence"] == "certain"
     assert "LEAK" in data["headline"]
+    assert "--strict high" in data["headline"]
+    assert "high-confidence" not in data["headline"]
+    assert "reasons" in data["findings"][0]
     assert SECRET_VALUE not in captured.out
     assert SECRET_VALUE_2 not in captured.out
     assert SECRET_VALUE not in captured.err
@@ -72,7 +79,9 @@ def test_scan_clean_tree_exits_zero(ka_home, project_dir, capsys) -> None:
     out = capsys.readouterr().out
 
     assert rc == 0
-    assert "0 LEAK" in out or "0 LEAKs" in out
+    assert "--strict high" in out
+    assert "0 certain · 0 likely · 0 possible" in out
+    assert "LEAK" in out
 
 
 def test_scan_excludes_node_modules_and_venv_by_default(
@@ -109,6 +118,22 @@ def test_scan_include_excluded_finds_nested_dotenv(
     (nm / ".env").write_text(f"NESTED={SECRET_VALUE}\n", encoding="utf-8")
 
     rc = main(["scan", "--include-excluded", "--no-import", "--json"])
+    data = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert data["leak_count"] == 1
+    assert any("node_modules" in f["path"] for f in data["findings"])
+    assert SECRET_VALUE not in json.dumps(data)
+
+
+def test_scan_wide_aliases_include_excluded(
+    ka_home, project_dir, capsys
+) -> None:
+    nm = project_dir / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / ".env").write_text(f"NESTED={SECRET_VALUE}\n", encoding="utf-8")
+
+    rc = main(["scan", "--wide", "--no-import", "--json"])
     data = json.loads(capsys.readouterr().out)
 
     assert rc == 1
@@ -167,10 +192,11 @@ def test_scan_headline_wording() -> None:
             secret_count=2,
             reason="test",
             importable=True,
+            confidence="certain",
         )
     ]
     text = headline(findings)
-    assert text.startswith("2 LEAKs found")
+    assert text.startswith("2 LEAKs found (--strict high)")
     assert "your agent can read 2 secrets" in text
     assert "Locally Exposed Agent Keys" in text
 
@@ -403,28 +429,32 @@ def test_scan_deep_agent_transcripts_line_hits(
     findings = scan_deep(home)
     transcripts = [f for f in findings if f.kind == "agent_session_transcript"]
 
-    session_f = next(f for f in transcripts if Path(f.path) == paths["claude_session"])
-    # Lines 3 (sk-ant) and 5 (nested API_KEY JSON string).
-    assert session_f.hit_lines == [3, 5]
-    assert session_f.secret_count == 2
-    assert session_f.scope == "deep"
-    assert any(n.upper() == "API_KEY" for n in session_f.secret_names)
+    session_fs = [f for f in transcripts if Path(f.path) == paths["claude_session"]]
+    assert session_fs
+    # Line 3 (sk-ant prefix → certain) and 5 (nested API_KEY → likely).
+    assert sorted(n for f in session_fs for n in f.hit_lines) == [3, 5]
+    assert sum(
+        f.secret_count for f in session_fs if f.confidence in ("certain", "likely")
+    ) == 2
+    assert any(n.upper() == "API_KEY" for f in session_fs for n in f.secret_names)
 
     assert not any(Path(f.path) == paths["claude_clean"] for f in transcripts)
 
-    sub_f = next(f for f in transcripts if Path(f.path) == paths["claude_subagent"])
-    assert sub_f.hit_lines == [1]
-    assert sub_f.secret_count == 1
+    sub_fs = [f for f in transcripts if Path(f.path) == paths["claude_subagent"]]
+    assert any(1 in f.hit_lines for f in sub_fs)
+    assert sum(f.secret_count for f in sub_fs if f.confidence in ("certain", "likely")) == 1
 
-    codex_f = next(f for f in transcripts if Path(f.path) == paths["codex"])
-    assert codex_f.secret_count >= 1
-    assert 1 in codex_f.hit_lines
+    codex_fs = [f for f in transcripts if Path(f.path) == paths["codex"]]
+    assert sum(f.secret_count for f in codex_fs if f.confidence in ("certain", "likely")) >= 1
+    assert any(1 in f.hit_lines for f in codex_fs)
 
-    copilot_f = next(f for f in transcripts if Path(f.path) == paths["copilot"])
-    assert copilot_f.hit_lines == [1]
+    copilot_fs = [f for f in transcripts if Path(f.path) == paths["copilot"]]
+    assert any(f.hit_lines == [1] for f in copilot_fs)
 
     assert transcript_line_hit_count(findings) == sum(
-        f.secret_count for f in transcripts
+        f.secret_count
+        for f in transcripts
+        if f.confidence in ("certain", "likely")
     )
     blob = json.dumps([f.__dict__ for f in findings])
     _assert_no_planted(blob)

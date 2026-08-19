@@ -44,10 +44,13 @@ ka init --project                 # or: ka init  for a global vault
 ka import .env                    # move plaintext into the vault (TTY-only; never prints values)
 ka scan                           # find remaining LEAKs (names/paths only)
 ka scan --deep                    # also home/shell/MCP + agent session transcripts
-ka run --secret API_KEY -- python my_script.py
+ka scan --strict paranoid         # also exit 1 on identifier/passphrase-shaped hits
+ka scan --wide                    # include default-excluded dirs (alias of --include-excluded)
+
+ka run --cwd DIR --secret API_KEY -- python my_script.py
 ```
 
-`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. Detection is **advisory** (the same regex + entropy heuristics as the secret-guard hook): false positives and false negatives are expected. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`.
+`ka scan` reports **names, paths, and counts** (plus line numbers for agent session transcripts under `--deep`). It never prints secret values. The headline names the `--strict` gate (default `high`: **certain** vendor prefixes and confirmed filenames + **likely** assignments/UUID). Identifier-, passphrase-, low-transition, and unconfirmed-`mcp.json` hits are `possible`: they appear in the always-printed three-count summary (`N certain · N likely · N possible`); `--strict paranoid` gates on them (the ≤0.4.9 assignment gate). Detection is **advisory**. `--deep` is not a full home walk — it checks known candidates including Claude Code `~/.claude/projects/**/*.jsonl`, Codex `~/.codex/sessions|archived_sessions/**/rollout-*.jsonl`, and Copilot CLI `~/.copilot/session-state/*/events.jsonl`. `--wide` aliases `--include-excluded` and does not imply `--deep`.
 
 `ka init` asks for the master password twice; if the entries do not match, nothing is created. **There is no recovery** if you forget that password — Argon2id + SecretBox leave none by design.
 

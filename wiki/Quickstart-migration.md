@@ -7,7 +7,7 @@ Goal: get off plaintext `.env` faster than deciding whether to.
 ka init --project          # creates .amnesia/; gitignores it
 ka import .env             # TTY-only; never prints values
 ka scan                    # find remaining LEAKs; may offer import
-ka run --secret NAME --as NAME=ENVVAR -- <command>
+ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- <command>
 ```
 
 Order matters: **import → scan → run**. Import moves a known dotenv file into
@@ -35,7 +35,12 @@ Reports Locally Exposed Agent Keys — filenames and light patterns. Default
 exclusions skip `node_modules`, `.venv`/`venv`, common build dirs, and
 `.git` internals (`--include-excluded` to include). Git-history scanning is
 **not** a feature of the default path (or of this tool's advertised
-workflow).
+workflow). The headline names the `--strict` gate (default `high`: certain
+vendor prefixes and confirmed filenames + likely assignments/UUID). Identifier-,
+passphrase-, low-transition-shaped, and unconfirmed-`mcp.json` hits are `possible`
+(`--strict paranoid` to gate — that is the ≤0.4.9 assignment gate). `--wide`
+aliases `--include-excluded` and does not imply `--deep`. Values are
+never printed.
 
 After the human report, an interactive TTY may offer to store selected
 importable dotenv hits into the project vault (password still required).
@@ -46,6 +51,8 @@ ka scan
 ka scan --no-import   # report only; never offer vault import
 ka scan --deep        # + home/shell/MCP paths
 ka scan --json        # machine-readable; report-only
+ka scan --strict paranoid   # also exit 1 on identifier/passphrase-shaped hits
+ka scan --wide        # include default-excluded dirs
 ka scan --yes         # import all importable dotenv hits (password still required)
 ```
 

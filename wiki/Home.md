@@ -3,7 +3,7 @@
 Encrypted secret vault for AI coding agents. The agent can **use** secrets
 through `ka run` without ever **seeing** the values.
 
-> **Docs as of 0.4.5.** Pages in this tree describe the shipped CLI at that
+> **Docs as of 0.4.10.** Pages in this tree describe the shipped CLI at that
 > version. The live GitHub Wiki may lag until maintainers publish from
 > in-repo `wiki/` (see that directory’s `README.md` — publish instructions
 > only; not a wiki page).
@@ -16,12 +16,23 @@ ka setup                          # skills + secret-guard hook
 ka init --project                 # or: ka init  for a global vault
 ka import .env                    # TTY-only; never prints values
 ka scan                           # find remaining LEAKs (names/paths only)
-ka run --secret API_KEY -- python my_script.py
+ka scan --deep                    # also home/shell/MCP + agent session transcripts
+ka scan --strict paranoid         # also exit 1 on identifier/passphrase-shaped hits
+ka scan --wide                    # include default-excluded dirs
+ka run --cwd DIR --secret API_KEY -- python my_script.py
 ```
 
 `ka run --secret NAME` injects the secret as environment variable `NAME`.
 To remap the env var name: `--as NAME=ENVVAR` (vault name on the left).
 Wrong forms that fail: `--as API_KEY`, `--as NAME`, `--as ENVVAR` (no `=`).
+Prefer `--cwd DIR` over `cd &&`.
+
+`ka scan` headline names the `--strict` gate (default `high`: **certain**
+vendor prefixes and confirmed filenames + **likely** assignments/UUID).
+**possible** hits (identifiers, passphrases, low-transition, unconfirmed
+`mcp.json`) always appear in the three-count summary; `--strict paranoid`
+gates on them (the ≤0.4.9 assignment gate). `--wide` aliases
+`--include-excluded` and does not imply `--deep`.
 
 `ka init` asks for the master password twice; if the entries do not match,
 nothing is created. **There is no recovery** if you forget that password.

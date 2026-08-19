@@ -199,16 +199,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_scan.add_argument(
         "--include-excluded",
+        "--wide",
         action="store_true",
+        dest="include_excluded",
         help=(
             "Include default-excluded dirs (node_modules, .venv/venv, build "
-            "dirs, .git internals). Git-history scanning is still out of scope."
+            "dirs, .git internals). --wide is an alias. Git-history scanning "
+            "is still out of scope. Independent of --deep."
         ),
     )
     p_scan.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON instead of human text",
+    )
+    p_scan.add_argument(
+        "--strict",
+        choices=("certain", "high", "paranoid"),
+        default="high",
+        help=(
+            "Exit 1 when findings at this gate are present. "
+            "certain: vendor prefixes and confirmed filenames only. "
+            "high (default): certain + likely (assignments/UUID). "
+            "paranoid: also possible (identifier/passphrase/low-transition; "
+            "this is the 0.4.9-and-earlier assignment gate). Invalid value exits 2"
+        ),
     )
     p_scan.add_argument(
         "--yes",
@@ -1075,8 +1090,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     Default exclusions skip ``node_modules``, ``.venv``/``venv``, common
     build dirs, and ``.git`` internals. ``--deep`` adds home/shell/MCP
     paths and known agent session transcript JSONL trees. Never prints
-    secret values. Detection is advisory (regex+entropy). Non-zero exit
-    if any LEAK count > 0.
+    secret values. Headline names the ``--strict`` gate; default
+    ``--strict high`` counts certain + likely. ``--strict paranoid`` is
+    the 0.4.9-and-earlier assignment gate. ``--wide`` aliases ``--include-excluded``.
     Optionally offers to store selected dotenv findings into the project
     vault via the shared ``dotenv_import`` core.
     """
@@ -1095,21 +1111,30 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 seen.add(f.path)
 
     as_json = bool(getattr(args, "json", False))
+    strict = getattr(args, "strict", "high") or "high"
     if as_json:
         theme.out(
             json.dumps(
                 scan_mod.findings_to_json(
-                    findings, project_root=str(project_root)
+                    findings,
+                    project_root=str(project_root),
+                    strict=strict,
                 ),
                 indent=2,
             )
             + "\n"
         )
     else:
-        theme.out(scan_mod.format_human_report(findings, project_root=project_root))
+        theme.out(
+            scan_mod.format_human_report(
+                findings,
+                project_root=project_root,
+                strict=strict,
+            )
+        )
         theme.out("")
 
-    n = scan_mod.leak_count(findings)
+    n = scan_mod.leak_count(findings, strict=strict)
     exit_code = 1 if n > 0 else 0
 
     # JSON / --no-import: report only. Interactive offer otherwise.

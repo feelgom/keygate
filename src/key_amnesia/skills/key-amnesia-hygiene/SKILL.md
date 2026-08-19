@@ -24,7 +24,7 @@ This skill is advisory: it describes the same detection vocabulary as the blocki
 Treat text as secret-shaped if either is true:
 
 - **Known prefixes anywhere:** `sk-`, `sk-ant-`, `ghp_`/`github_pat_`, `AKIA...`, `xoxb-`/other `xox*-`, `AIza...`, plus Stripe (`sk_live_`/`rk_live_`), `npm_`, `glpat-`, and generic `Bearer <token>`.
-- **Assignment + high entropy:** a `(API_KEY|TOKEN|SECRET|PASSWORD)[:=]` style assignment whose value is long and mixed-case/digit (looks random), not a placeholder.
+- **Assignment + high entropy:** a `(API_KEY|TOKEN|SECRET|PASSWORD)[:=]` style assignment whose value is long and mixed-case/digit (looks random), not a placeholder. Function-call values (`secrets.token_hex(8)`) and type annotations (`Optional[str]`) are not findings. CamelCase identifiers and word-shaped passphrases (`CorrectHorseBattery`) still match this hook vocabulary — that over-block is intentional. (`ka scan` counts those as `possible` only; the default `--strict high` headline uses certain + likely / prefix.)
 
 **Not** a finding by itself (do not flag): bare `API_KEY` with no value, a comment that merely mentions "secret", or an assignment to an obvious placeholder like `PASSWORD=test123` / `TOKEN=changeme`. Advisory judgment still applies — use sense, don't nag on clearly-fake values.
 

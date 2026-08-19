@@ -6,9 +6,11 @@ secret *files* and light assignment / prefix patterns. Reports **names,
 paths, counts, and (for transcripts) line numbers only** — never prints,
 logs, or copies secret values.
 
-Detection is **advisory** regex + entropy heuristics (same vocabulary as
-the secret-guard hook): false positives and false negatives are expected.
-Policy classification: Scan LEAK report is **advisory** (not cryptography).
+Detection is **advisory**. The headline names the ``--strict`` gate.
+Default ``--strict high`` exit counts ``certain`` + ``likely``. Identifier-
+and passphrase-shaped hits are ``possible`` (``--strict paranoid`` to
+gate). Policy classification: Scan LEAK report is **advisory** (not
+cryptography).
 """
 
 from __future__ import annotations
@@ -20,14 +22,20 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from key_amnesia.dotenv_import import parse_dotenv
-from key_amnesia.hooks.secret_guard import (
-    _ASSIGN,
-    _BEARER,
-    _PREFIX_PATTERNS,
-    _assignment_is_secret,
-    _collect_strings,
+from key_amnesia.detect import (
+    NAMED_WEAKENING_IDENTIFIER,
+    NAMED_WEAKENING_LOW_TRANSITION,
+    NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
+    REASON_UNCONFIRMED_MCP,
+    REASON_UUID,
+    HitSet,
+    classify_value,
+    collect_strings,
+    iter_secret_keyed_strings,
+    looks_like_json_container,
+    scan_text_hits,
 )
+from key_amnesia.dotenv_import import parse_dotenv
 
 # Directory basenames skipped by default (B4). ``.git`` skips all git
 # internals — git-*history* secret scanning is intentionally out of scope.
@@ -67,6 +75,25 @@ _MAX_TRANSCRIPT_BYTES = 100 * 1024 * 1024
 
 # Cap human-report line lists; full list remains in ``--json``.
 _HIT_LINES_DISPLAY_CAP = 20
+
+STRICT_CERTAIN = "certain"
+STRICT_HIGH = "high"
+STRICT_PARANOID = "paranoid"
+_CONF_ORDER = {"certain": 0, "likely": 1, "possible": 2}
+_REASON_LABELS: dict[str, str] = {
+    NAMED_WEAKENING_IDENTIFIER: "identifier",
+    NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE: "passphrase",
+    NAMED_WEAKENING_LOW_TRANSITION: "low-transition",
+    REASON_UUID: "uuid",
+    REASON_UNCONFIRMED_MCP: "unconfirmed-mcp-shape",
+}
+_REASON_LABEL_ORDER: tuple[str, ...] = (
+    NAMED_WEAKENING_IDENTIFIER,
+    NAMED_WEAKENING_WORD_SHAPED_PASSPHRASE,
+    NAMED_WEAKENING_LOW_TRANSITION,
+    REASON_UUID,
+    REASON_UNCONFIRMED_MCP,
+)
 
 # Text-ish extensions worth content-scanning for assignment patterns.
 _CONTENT_SCAN_SUFFIXES = frozenset(
@@ -142,6 +169,11 @@ class Finding:
     scope: str = "project"  # "project" | "deep"
     # 1-based JSONL line numbers (agent transcripts only).
     hit_lines: list[int] = field(default_factory=list)
+    # certain | likely | possible — constructions set this explicitly.
+    confidence: str = ""
+    # Named reason codes (never values): uuid, low-transition, identifier, …
+    reasons: list[str] = field(default_factory=list)
+    reason_counts: dict[str, int] = field(default_factory=dict)
 
 
 def _is_dotenv_filename(name: str) -> bool:
@@ -208,6 +240,7 @@ def _dotenv_finding(path: Path, *, scope: str) -> Finding | None:
             reason="dotenv file (no KEY=VALUE entries)",
             importable=False,
             scope=scope,
+            confidence="certain",
         )
     if not names:
         return Finding(
@@ -218,6 +251,7 @@ def _dotenv_finding(path: Path, *, scope: str) -> Finding | None:
             reason="dotenv file (empty values only)",
             importable=False,
             scope=scope,
+            confidence="certain",
         )
     return Finding(
         path=str(path),
@@ -227,6 +261,7 @@ def _dotenv_finding(path: Path, *, scope: str) -> Finding | None:
         reason=f"dotenv file with {len(names)} secret name(s)",
         importable=True,
         scope=scope,
+        confidence="certain",
     )
 
 
@@ -244,79 +279,65 @@ def _json_key_names(path: Path) -> list[str]:
     return []
 
 
-def _content_assignment_names(text: str) -> list[str]:
-    """Reuse hook assignment vocabulary; return matched *names* only."""
-    names: list[str] = []
-    seen: set[str] = set()
-    for match in _ASSIGN.finditer(text):
-        value = match.group("value")
-        if not _assignment_is_secret(value):
-            continue
-        name = match.group("name")
-        key = name.upper()
-        if key in seen:
-            continue
-        seen.add(key)
-        names.append(name)
-    return names
-
-
-def _content_prefix_hit(text: str) -> str | None:
-    for kind, pattern in _PREFIX_PATTERNS:
-        if pattern.search(text):
-            return kind
-    if _BEARER.search(text):
-        return "Bearer token"
-    return None
-
-
 def scan_text_for_leaks(text: str) -> tuple[list[str], str | None]:
-    """Shared detector: assignment *names* + optional prefix/Bearer kind.
+    """High-confidence assignment *names* + optional prefix/Bearer kind.
 
-    Never returns secret values. Same vocabulary as the secret-guard hook.
+    Never returns secret values. Possible-tier hits are omitted here;
+    use ``scan_text_hits`` for the split.
     """
     if not text:
         return [], None
-    return _content_assignment_names(text), _content_prefix_hit(text)
+    hits = scan_text_hits(text)
+    return hits.likely_names, hits.prefix
 
 
-def _looks_like_json_container(s: str) -> bool:
-    t = s.lstrip()
-    return t.startswith("{") or t.startswith("[")
-
-
-def _strings_from_decoded_json(obj: Any) -> list[str]:
-    """Collect strings from a decoded JSON value; unwrap one nested JSON string."""
-    out: list[str] = []
-    for s in _collect_strings(obj):
-        out.append(s)
-        if not _looks_like_json_container(s):
+def _apply_secret_keys(acc: HitSet, node: Any) -> None:
+    """Classify secret-named dict keys that never appear as ASSIGN text."""
+    for key, val in iter_secret_keyed_strings(node):
+        extra = HitSet()
+        tier, reason = classify_value(val)
+        if tier not in ("likely", "possible"):
             continue
-        try:
-            nested = json.loads(s)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(nested, (dict, list)):
-            out.extend(_collect_strings(nested))
-    return out
+        extra.record_assignment(key, tier, [reason] if reason else [])
+        acc.merge(extra)
 
 
-def _scan_transcript_payload(obj: Any) -> tuple[list[str], str | None]:
-    """Run detectors on all string payloads from one JSONL line object."""
-    names: list[str] = []
-    seen: set[str] = set()
-    prefix: str | None = None
-    for s in _strings_from_decoded_json(obj):
-        line_names, line_prefix = scan_text_for_leaks(s)
-        for name in line_names:
-            key = name.upper()
-            if key in seen:
+def _scan_transcript_payload(obj: Any) -> HitSet:
+    """Run detectors on string payloads and secret-named JSON keys.
+
+    JSON-container strings are unwrapped once and not run through
+    ``scan_text_hits`` (ASSIGN on serialized JSON plus a secret-key walk
+    would double-count). Non-JSON strings are scanned. Secret-key walk
+    covers dict keys that never appear as ASSIGN text. Never returns values.
+    """
+    acc = HitSet()
+    nested_objs: list[Any] = []
+
+    def _ingest_strings(node: Any) -> None:
+        for s in collect_strings(node):
+            if looks_like_json_container(s):
+                try:
+                    nested = json.loads(s)
+                except json.JSONDecodeError:
+                    nested = None
+                if isinstance(nested, (dict, list)):
+                    nested_objs.append(nested)
+                    continue
+            acc.merge(scan_text_hits(s))
+
+    _ingest_strings(obj)
+    # One-level unwrap: inner strings of parsed JSON containers, not the
+    # container text itself (already skipped above).
+    for nested in list(nested_objs):
+        for s in collect_strings(nested):
+            if looks_like_json_container(s):
                 continue
-            seen.add(key)
-            names.append(name)
-        if line_prefix and prefix is None:
-            prefix = line_prefix
-    return names, prefix
+            acc.merge(scan_text_hits(s))
+
+    _apply_secret_keys(acc, obj)
+    for nested in nested_objs:
+        _apply_secret_keys(acc, nested)
+    return acc
 
 
 def iter_agent_transcript_files(home: Path | None = None) -> Iterable[Path]:
@@ -366,18 +387,98 @@ def iter_agent_transcript_files(home: Path | None = None) -> Iterable[Path]:
             pass
 
 
-def _finding_for_transcript(path: Path, *, scope: str) -> Finding | None:
+def _inline_findings(
+    path: Path,
+    text: str,
+    *,
+    scope: str,
+    kind: str,
+    high_reason: str,
+    possible_reason: str,
+) -> list[Finding]:
+    """Split content hits into high vs possible findings. Never includes values."""
+    hits = scan_text_hits(text)
+    likely_names = hits.likely_names
+    possible_names = hits.possible_names
+    prefix = hits.prefix
+    bearer_likely = hits.bearer_likely
+    bearer_possible = hits.bearer_possible
+
+    out: list[Finding] = []
+    if prefix:
+        out.append(
+            Finding(
+                path=str(path),
+                kind=kind,
+                secret_names=[],
+                secret_count=1,
+                reason=f"inline credential-shaped token ({prefix})",
+                importable=False,
+                scope=scope,
+                confidence="certain",
+            )
+        )
+    if likely_names or bearer_likely:
+        count = len(likely_names) if likely_names else 1
+        reason = high_reason
+        if bearer_likely and not likely_names:
+            reason = "inline credential-shaped token (Bearer token)"
+        out.append(
+            Finding(
+                path=str(path),
+                kind=kind,
+                secret_names=likely_names,
+                secret_count=count,
+                reason=reason,
+                importable=False,
+                scope=scope,
+                confidence="likely",
+                reasons=list(hits.likely_reasons),
+                reason_counts=dict(hits.likely_reason_counts),
+            )
+        )
+    if possible_names or bearer_possible:
+        names = possible_names
+        count = len(names) if names else 1
+        out.append(
+            Finding(
+                path=str(path),
+                kind=kind,
+                secret_names=names,
+                secret_count=count,
+                reason=possible_reason,
+                importable=False,
+                scope=scope,
+                confidence="possible",
+                reasons=list(hits.possible_reasons),
+                reason_counts=dict(hits.possible_reason_counts),
+            )
+        )
+    return out
+
+
+def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
     """Scan one JSONL session transcript; names/paths/line hits only."""
     try:
         size = path.stat().st_size
     except OSError:
-        return None
+        return []
     if size > _MAX_TRANSCRIPT_BYTES:
-        return None
+        return []
 
-    hit_lines: list[int] = []
-    all_names: list[str] = []
-    seen_names: set[str] = set()
+    certain_lines: list[int] = []
+    likely_lines: list[int] = []
+    possible_lines: list[int] = []
+    certain_names: list[str] = []
+    likely_names: list[str] = []
+    possible_names: list[str] = []
+    likely_reasons: list[str] = []
+    possible_reasons: list[str] = []
+    likely_reason_counts: dict[str, int] = {}
+    possible_reason_counts: dict[str, int] = {}
+    seen_certain: set[str] = set()
+    seen_likely: set[str] = set()
+    seen_possible: set[str] = set()
 
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -389,42 +490,139 @@ def _finding_for_transcript(path: Path, *, scope: str) -> Finding | None:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                names, prefix = _scan_transcript_payload(obj)
-                if not names and not prefix:
+                hits = _scan_transcript_payload(obj)
+                has_certain = bool(hits.prefix)
+                has_likely = bool(hits.likely_names or hits.bearer_likely)
+                has_possible = bool(hits.possible_names or hits.bearer_possible)
+                if not has_certain and not has_likely and not has_possible:
                     continue
-                hit_lines.append(line_no)
-                for name in names:
-                    key = name.upper()
-                    if key in seen_names:
-                        continue
-                    seen_names.add(key)
-                    all_names.append(name)
+                if has_certain:
+                    certain_lines.append(line_no)
+                    if hits.prefix and hits.prefix not in seen_certain:
+                        seen_certain.add(hits.prefix)
+                        certain_names.append(hits.prefix)
+                if has_likely:
+                    if not has_certain:
+                        likely_lines.append(line_no)
+                    for name in hits.likely_names:
+                        key = name.upper()
+                        if key in seen_likely or key in seen_certain:
+                            continue
+                        seen_likely.add(key)
+                        likely_names.append(name)
+                    for reason in hits.likely_reasons:
+                        if reason not in likely_reasons:
+                            likely_reasons.append(reason)
+                    for reason, n in hits.likely_reason_counts.items():
+                        likely_reason_counts[reason] = (
+                            likely_reason_counts.get(reason, 0) + n
+                        )
+                # Mixed higher-tier lines stay out of possible hit_lines /
+                # transcript_line_hit_count, but possible names/reasons are
+                # still recorded so histograms stay complete.
+                if has_possible:
+                    if not has_certain and not has_likely:
+                        possible_lines.append(line_no)
+                    for name in hits.possible_names:
+                        key = name.upper()
+                        if (
+                            key in seen_possible
+                            or key in seen_likely
+                            or key in seen_certain
+                        ):
+                            continue
+                        seen_possible.add(key)
+                        possible_names.append(name)
+                    for reason in hits.possible_reasons:
+                        if reason not in possible_reasons:
+                            possible_reasons.append(reason)
+                    for reason, n in hits.possible_reason_counts.items():
+                        possible_reason_counts[reason] = (
+                            possible_reason_counts.get(reason, 0) + n
+                        )
     except OSError:
-        return None
+        return []
 
-    if not hit_lines:
-        return None
+    out: list[Finding] = []
+    if certain_lines:
+        out.append(
+            Finding(
+                path=str(path),
+                kind="agent_session_transcript",
+                secret_names=certain_names,
+                secret_count=len(certain_lines),
+                reason=(
+                    f"agent session transcript: {len(certain_lines)} line(s) with "
+                    "vendor-prefix credential-shaped content (advisory; false "
+                    "positives/negatives expected)"
+                ),
+                importable=False,
+                scope=scope,
+                hit_lines=certain_lines,
+                confidence="certain",
+            )
+        )
+    if likely_lines or likely_names:
+        if likely_lines:
+            likely_reason = (
+                f"agent session transcript: {len(likely_lines)} line(s) with "
+                "likely assignment-shaped content (advisory; false "
+                "positives/negatives expected)"
+            )
+        else:
+            likely_reason = (
+                "agent session transcript: likely assignment-shaped names "
+                "on higher-confidence lines"
+            )
+        out.append(
+            Finding(
+                path=str(path),
+                kind="agent_session_transcript",
+                secret_names=likely_names,
+                secret_count=len(likely_lines),
+                reason=likely_reason,
+                importable=False,
+                scope=scope,
+                hit_lines=likely_lines,
+                confidence="likely",
+                reasons=likely_reasons,
+                reason_counts=likely_reason_counts,
+            )
+        )
+    if possible_lines or possible_names:
+        if possible_lines:
+            poss_reason = (
+                f"agent session transcript: {len(possible_lines)} line(s) with "
+                "possible identifier- or passphrase-shaped content"
+            )
+        else:
+            poss_reason = (
+                "agent session transcript: possible identifier- or "
+                "passphrase-shaped names on higher-confidence lines"
+            )
+        out.append(
+            Finding(
+                path=str(path),
+                kind="agent_session_transcript",
+                secret_names=possible_names,
+                secret_count=len(possible_lines),
+                reason=poss_reason,
+                importable=False,
+                scope=scope,
+                hit_lines=possible_lines,
+                confidence="possible",
+                reasons=possible_reasons,
+                reason_counts=possible_reason_counts,
+            )
+        )
+    return out
 
-    return Finding(
-        path=str(path),
-        kind="agent_session_transcript",
-        secret_names=all_names,
-        secret_count=len(hit_lines),
-        reason=(
-            f"agent session transcript: {len(hit_lines)} line(s) with "
-            "credential-shaped content (advisory regex+entropy; false "
-            "positives/negatives expected)"
-        ),
-        importable=False,
-        scope=scope,
-        hit_lines=hit_lines,
-    )
 
-
-def _finding_for_path(path: Path, *, scope: str) -> Finding | None:
+def _findings_for_path(path: Path, *, scope: str) -> list[Finding]:
     kind = _filename_kind(path)
     if kind == "dotenv":
-        return _dotenv_finding(path, scope=scope)
+        finding = _dotenv_finding(path, scope=scope)
+        return [] if finding is None else [finding]
 
     if kind is not None:
         names: list[str] = []
@@ -437,75 +635,96 @@ def _finding_for_path(path: Path, *, scope: str) -> Finding | None:
         elif kind == "mcp_config":
             names = _json_key_names(path)
             count = max(len(names), 1)
-            reason = f"MCP config ({count} top-level key name(s))"
+            confirmed = any(k in ("mcpServers", "servers") for k in names)
+            if confirmed:
+                return [
+                    Finding(
+                        path=str(path),
+                        kind=kind,
+                        secret_names=names,
+                        secret_count=count,
+                        reason=f"MCP config ({count} top-level key name(s))",
+                        importable=False,
+                        scope=scope,
+                        confidence="certain",
+                    )
+                ]
+            # Unrecognised shape: demote to possible, do not drop.
+            # Presence/shape finding: one per file, not per top-level key.
+            return [
+                Finding(
+                    path=str(path),
+                    kind=kind,
+                    secret_names=names,
+                    secret_count=1,
+                    reason=(
+                        "unconfirmed MCP config shape (no top-level "
+                        "mcpServers/servers)"
+                    ),
+                    importable=False,
+                    scope=scope,
+                    confidence="possible",
+                    reasons=[REASON_UNCONFIRMED_MCP],
+                    reason_counts={REASON_UNCONFIRMED_MCP: 1},
+                )
+            ]
         elif kind in (".npmrc", ".pypirc"):
-            # Presence alone is a LEAK; don't parse auth tokens into names.
             reason = f"{kind} (may contain registry auth tokens)"
         elif kind == "ssh_private_key":
             reason = "SSH private key file"
         elif kind == "shell_history":
             text = _safe_read_text(path)
-            if text:
-                prefix = _content_prefix_hit(text)
-                assigns = _content_assignment_names(text)
-                if prefix or assigns:
-                    names = assigns
-                    count = max(len(assigns), 1 if prefix else 0)
-                    reason = "shell history with credential-shaped content"
-                else:
-                    return None  # empty/harmless history — not a LEAK
-            else:
-                return None
+            if not text:
+                return []
+            return _inline_findings(
+                path,
+                text,
+                scope=scope,
+                kind=kind,
+                high_reason="shell history with credential-shaped content",
+                possible_reason=(
+                    "shell history with possible identifier- or "
+                    "passphrase-shaped content"
+                ),
+            )
         elif kind == "git_config":
             text = _safe_read_text(path) or ""
-            # Only flag if it looks like it embeds a token (url with @, etc.)
             if not re.search(
                 r"(?i)(token|password|authorization|_authToken)\s*=", text
             ) and "://" not in text:
-                # Still check for github token-ish in https URLs
                 if not re.search(r"https?://[^/\s:]+:[^/\s]+@", text):
-                    return None
+                    return []
             reason = "git config may embed credentials"
-        return Finding(
-            path=str(path),
-            kind=kind,
-            secret_names=names,
-            secret_count=count,
-            reason=reason,
-            importable=False,
-            scope=scope,
-        )
+        return [
+            Finding(
+                path=str(path),
+                kind=kind,
+                secret_names=names,
+                secret_count=count,
+                reason=reason,
+                importable=False,
+                scope=scope,
+                confidence="certain",
+            )
+        ]
 
-    # Light content scan for assignment / well-known prefixes.
     suffix = path.suffix.lower()
     if suffix not in _CONTENT_SCAN_SUFFIXES and path.name not in {
         "Dockerfile",
         "Makefile",
         "Jenkinsfile",
     }:
-        return None
+        return []
     text = _safe_read_text(path)
     if not text:
-        return None
-    names, prefix = scan_text_for_leaks(text)
-    if not names and not prefix:
-        return None
-    count = len(names) if names else 1
-    reason = (
-        f"inline credential-shaped token ({prefix})"
-        if prefix and not names
-        else "assignment pattern matching secret-guard vocabulary"
-    )
-    if prefix and names:
-        reason = f"assignment + {prefix}"
-    return Finding(
-        path=str(path),
-        kind="inline",
-        secret_names=names,
-        secret_count=count,
-        reason=reason,
-        importable=False,
+        return []
+    return _inline_findings(
+        path,
+        text,
         scope=scope,
+        kind="inline",
+        high_reason="assignment pattern matching secret-guard vocabulary",
+        possible_reason="possible identifier- or passphrase-shaped assignment",
     )
 
 
@@ -551,21 +770,23 @@ def scan_project(
                 continue
         except OSError:
             continue
-        finding = _finding_for_path(path, scope="project")
-        if finding is None:
+        key = str(path)
+        try:
+            key = str(path.resolve())
+        except OSError:
+            pass
+        if key in seen:
             continue
-        # Skip comment-only / empty dotenv files (no LEAK secrets to report).
-        if (
-            finding.kind == "dotenv"
-            and finding.secret_count == 0
-            and not finding.secret_names
-        ):
-            continue
-        if finding.path in seen:
-            continue
-        seen.add(finding.path)
-        findings.append(finding)
-    findings.sort(key=lambda f: f.path)
+        seen.add(key)
+        for finding in _findings_for_path(path, scope="project"):
+            if (
+                finding.kind == "dotenv"
+                and finding.secret_count == 0
+                and not finding.secret_names
+            ):
+                continue
+            findings.append(finding)
+    findings.sort(key=lambda f: (f.path, _CONF_ORDER.get(f.confidence, 9)))
     return findings
 
 
@@ -637,15 +858,22 @@ def scan_deep(home: Path | None = None) -> list[Finding]:
                 continue
         except OSError:
             continue
-        finding = _finding_for_path(path, scope="deep")
-        if finding is None:
+        key = str(path)
+        try:
+            key = str(path.resolve())
+        except OSError:
+            pass
+        if key in seen:
             continue
-        if finding.kind == "dotenv" and finding.secret_count == 0 and not finding.secret_names:
-            continue
-        if finding.path in seen:
-            continue
-        seen.add(finding.path)
-        findings.append(finding)
+        seen.add(key)
+        for finding in _findings_for_path(path, scope="deep"):
+            if (
+                finding.kind == "dotenv"
+                and finding.secret_count == 0
+                and not finding.secret_names
+            ):
+                continue
+            findings.append(finding)
 
     for path in iter_agent_transcript_files(home):
         try:
@@ -654,53 +882,143 @@ def scan_deep(home: Path | None = None) -> list[Finding]:
             key = str(path)
         if key in seen:
             continue
-        finding = _finding_for_transcript(path, scope="deep")
-        if finding is None:
-            continue
-        seen.add(finding.path)
-        # Also mark resolved key so candidate-path overlap cannot double-count.
         seen.add(key)
-        findings.append(finding)
+        for finding in _findings_for_transcript(path, scope="deep"):
+            seen.add(finding.path)
+            findings.append(finding)
 
-    findings.sort(key=lambda f: f.path)
+    findings.sort(key=lambda f: (f.path, _CONF_ORDER.get(f.confidence, 9)))
     return findings
 
 
-def leak_count(findings: list[Finding]) -> int:
-    return sum(max(f.secret_count, 0) for f in findings)
+def gated_confidences(strict: str) -> frozenset[str]:
+    if strict == STRICT_CERTAIN:
+        return frozenset({"certain"})
+    if strict == STRICT_PARANOID:
+        return frozenset({"certain", "likely", "possible"})
+    return frozenset({"certain", "likely"})
+
+
+def leak_count(findings: list[Finding], *, strict: str = STRICT_HIGH) -> int:
+    gated = gated_confidences(strict)
+    return sum(max(f.secret_count, 0) for f in findings if f.confidence in gated)
+
+
+def certain_count(findings: list[Finding]) -> int:
+    return sum(max(f.secret_count, 0) for f in findings if f.confidence == "certain")
+
+
+def likely_count(findings: list[Finding]) -> int:
+    return sum(max(f.secret_count, 0) for f in findings if f.confidence == "likely")
+
+
+def possible_count(findings: list[Finding]) -> int:
+    return sum(
+        max(f.secret_count, 0) for f in findings if f.confidence == "possible"
+    )
 
 
 def transcript_line_hit_count(findings: list[Finding]) -> int:
-    """Sum of LEAK line-hits in ``agent_session_transcript`` findings."""
+    """Sum of certain+likely LEAK line-hits in transcript findings."""
     return sum(
         max(f.secret_count, 0)
         for f in findings
         if f.kind == "agent_session_transcript"
+        and f.confidence in ("certain", "likely")
     )
 
 
-def headline(findings: list[Finding], *, project_label: str = "this project") -> str:
-    n = leak_count(findings)
+def headline(
+    findings: list[Finding],
+    *,
+    project_label: str = "this project",
+    strict: str = STRICT_HIGH,
+) -> str:
+    n = leak_count(findings, strict=strict)
     unit = "LEAK" if n == 1 else "LEAKs"
     return (
-        f"{n} {unit} found — your agent can read {n} secret"
+        f"{n} {unit} found (--strict {strict}) — your agent can read {n} secret"
         f"{'' if n == 1 else 's'} in {project_label} "
         f"(LEAK = Locally Exposed Agent Keys)"
     )
 
 
-def findings_to_json(findings: list[Finding], *, project_root: str) -> dict[str, Any]:
-    n = leak_count(findings)
+def _reason_bucket_counts(findings: list[Finding]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for f in findings:
+        if f.confidence == "possible":
+            if f.reason_counts:
+                for reason, n in f.reason_counts.items():
+                    counts[reason] = counts.get(reason, 0) + n
+            elif f.reasons:
+                if len(f.reasons) == 1:
+                    counts[f.reasons[0]] = counts.get(f.reasons[0], 0) + max(
+                        f.secret_count, 1
+                    )
+                else:
+                    for reason in f.reasons:
+                        counts[reason] = counts.get(reason, 0) + 1
+            else:
+                counts[NAMED_WEAKENING_IDENTIFIER] = counts.get(
+                    NAMED_WEAKENING_IDENTIFIER, 0
+                ) + max(f.secret_count, 1)
+        elif f.confidence == "likely" and REASON_UUID in f.reasons:
+            n = 0
+            if f.reason_counts and REASON_UUID in f.reason_counts:
+                n = f.reason_counts[REASON_UUID]
+            else:
+                n = max(f.secret_count, 1)
+            counts[REASON_UUID] = counts.get(REASON_UUID, 0) + n
+    return counts
+
+
+def format_count_summary(findings: list[Finding]) -> str:
+    """Always-printed three-count line. Identical at every ``--strict``."""
+    base = (
+        f"{certain_count(findings)} certain · {likely_count(findings)} likely · "
+        f"{possible_count(findings)} possible"
+    )
+    buckets = _reason_bucket_counts(findings)
+    if not buckets:
+        return base
+    parts: list[str] = []
+    seen: set[str] = set()
+    for reason in _REASON_LABEL_ORDER:
+        if reason in buckets and buckets[reason] > 0:
+            label = _REASON_LABELS.get(reason, reason)
+            parts.append(f"{buckets[reason]} {label}")
+            seen.add(reason)
+    for reason, n in sorted(buckets.items()):
+        if reason in seen or n <= 0:
+            continue
+        parts.append(f"{n} {_REASON_LABELS.get(reason, reason)}")
+    if not parts:
+        return base
+    return f"{base} ({' · '.join(parts)})"
+
+
+def findings_to_json(
+    findings: list[Finding],
+    *,
+    project_root: str,
+    strict: str = STRICT_HIGH,
+) -> dict[str, Any]:
+    n = leak_count(findings, strict=strict)
     transcript_hits = transcript_line_hit_count(findings)
     return {
         "leak_count": n,
+        "certain_count": certain_count(findings),
+        "likely_count": likely_count(findings),
+        "possible_count": possible_count(findings),
         "transcript_line_hits": transcript_hits,
-        "headline": headline(findings),
+        "headline": headline(findings, strict=strict),
+        "strict": strict,
         "project_root": project_root,
         "findings": [asdict(f) for f in findings],
         "detection_note": (
-            "Advisory regex+entropy heuristics (secret-guard vocabulary); "
-            "false positives and false negatives are expected. "
+            "Advisory heuristics; leak_count matches the --strict gate "
+            f"({strict}). certain_count / likely_count / possible_count are "
+            "ungated. Per-finding confidence and reasons are always present. "
             "Values are never included."
         ),
     }
@@ -718,8 +1036,18 @@ def _format_hit_lines(hit_lines: list[int]) -> str:
     return f"\n      lines: {shown} (and {rest} more; see --json)"
 
 
-def format_human_report(findings: list[Finding], *, project_root: Path) -> str:
-    lines: list[str] = [headline(findings), ""]
+def format_human_report(
+    findings: list[Finding],
+    *,
+    project_root: Path,
+    strict: str = STRICT_HIGH,
+) -> str:
+    lines: list[str] = [
+        headline(findings, strict=strict),
+        "",
+        format_count_summary(findings),
+        "",
+    ]
     transcript_hits = transcript_line_hit_count(findings)
     if transcript_hits:
         unit = "LEAK" if transcript_hits == 1 else "LEAKs"
@@ -728,16 +1056,32 @@ def format_human_report(findings: list[Finding], *, project_root: Path) -> str:
             f"(line-hits; advisory detection)"
         )
         lines.append("")
-    if not findings:
-        lines.append("No locally exposed agent keys found under default exclusions.")
+    gated = gated_confidences(strict)
+    listed = [
+        f
+        for f in findings
+        if f.confidence in gated
+        and not (
+            f.secret_count == 0 and f.kind == "agent_session_transcript"
+        )
+    ]
+    if not listed:
+        lines.append(
+            "No locally exposed agent keys found under default exclusions."
+        )
         return "\n".join(lines)
     lines.append(f"Project root: {project_root}")
     lines.append("")
-    for i, f in enumerate(findings, start=1):
+    for i, f in enumerate(listed, start=1):
         names = ", ".join(f.secret_names) if f.secret_names else "(filename/presence)"
+        extra_reasons = ""
+        if f.reasons:
+            extra_reasons = f"  reasons={','.join(f.reasons)}"
         lines.append(
             f"  [{i}] {f.path}"
-            f"\n      kind={f.kind}  count={f.secret_count}  scope={f.scope}"
+            f"\n      kind={f.kind}  count={f.secret_count}  "
+            f"scope={f.scope}  confidence={f.confidence}"
+            f"{extra_reasons}"
             f"\n      names: {names}"
             f"\n      {f.reason}"
             + ("  [importable]" if f.importable else "")
@@ -749,8 +1093,9 @@ def format_human_report(findings: list[Finding], *, project_root: Path) -> str:
         "post-scan offer, or run `ka import FILE`."
     )
     lines.append(
-        "Detection is advisory (regex + entropy heuristics); false positives "
-        "and false negatives are expected."
+        "Detection is advisory; false positives and false negatives are "
+        "expected. Word-shaped passphrases appear under possible, not the "
+        "default headline count."
     )
     return "\n".join(lines)
 

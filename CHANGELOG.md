@@ -2,7 +2,26 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.9`.
+Versions follow the git tags `0.4.0` … `0.4.10`.
+
+## [0.4.10] — 2026-08-19
+
+### Behavior change
+
+- `ka scan` exit 1 follows `--strict` (`certain` / `high` / `paranoid`, default `high`): **certain** is vendor prefixes and confirmed filenames; **likely** is assignment and UUID hits; **possible** is identifier, passphrase, low-transition, and unconfirmed `mcp.json`. Default exit 1 means certain + likely. Trees that exited 1 on identifier / function-call / doc-assignment hits in ≤0.4.9 now exit **0** unless you pass `--strict paranoid` (that is the ≤0.4.9 assignment gate). Invalid `--strict` exits 2.
+
+Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-threshold assignment hit (English identifiers, `token = secrets.token_hex(8)`, this repo’s own typed annotations). The three-count summary (`N certain · N likely · N possible`) prints at every strictness; only the listing, exit, and headline number change.
+
+### Added
+
+- Shared detector module (`key_amnesia.detect`) with explicit tiers: `none` / `possible` / `likely` / `prefix`. Hook still denies `possible|likely|prefix` except function-call and `Name[...]` type-annotation values.
+- `ka scan --strict` with values `certain`, `high`, or `paranoid` (default `high`). `--wide` aliases `--include-excluded` and is independent of `--deep`.
+- Quoted-name assignments (`"api_key": "…"`) and JSON key walk for transcripts.
+- Named reasons on findings (`uuid`, `identifier`, `word-shaped-passphrase`, `low-transition`, `unconfirmed-mcp-shape`). Unconfirmed `mcp.json` / `claude_desktop_config.json` demote to possible; they are not dropped. Unconfirmed MCP is one possible per file, not per top-level key.
+
+### Changed
+
+- Human headline: `N LEAKs found (--strict high) — your agent can read N secrets in this project (LEAK = Locally Exposed Agent Keys)`. The gate name is in the headline. The three-count summary is unconditional.
 
 ## [0.4.9] — 2026-08-17
 
@@ -101,6 +120,7 @@ Versions follow the git tags `0.4.0` … `0.4.9`.
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.10]: https://github.com/fujitoid/key-amnesia/compare/0.4.7...0.4.10
 [0.4.7]: https://github.com/fujitoid/key-amnesia/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/fujitoid/key-amnesia/compare/0.4.5...0.4.6
 [0.4.5]: https://github.com/fujitoid/key-amnesia/compare/0.4.4...0.4.5
