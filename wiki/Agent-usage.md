@@ -23,9 +23,10 @@ truth — only the live status reply is. Do **not** reflexively run
 ## Preferred pattern
 
 ```bash
-ka run --secret NAME --as NAME=ENVVAR -- <command> [args...]
+ka run --cwd DIR --secret NAME --as NAME=ENVVAR -- <command> [args...]
 ```
 
+- Prefer `--cwd DIR` over `cd &&`. Do not wrap `ka run` in pipes or `2>&1`.
 - `--as` is **`NAME=ENVVAR`** (vault name on the left, environment variable
   on the right). Omit `--as` to inject as `NAME`.
 - Wrong: `--as API_KEY`, `--as NAME`, `--as ENVVAR`, `--as ENV`.
@@ -38,8 +39,8 @@ ka run --secret NAME --as NAME=ENVVAR -- <command> [args...]
 |--------|-----|-------|
 | `ka status` / `ka connect` | Yes | Session metadata; check first |
 | `ka list` | Yes | Names only; no password |
-| `ka run --secret NAME [--as NAME=ENVVAR] -- ...` | Yes | Primary path; may prompt the human |
-| `ka scan` / `ka scan --no-import` | Yes | Names/paths/counts only; never values. Default exit is `--strict high` (`--strict paranoid` for the ≤0.4.9 assignment gate) |
+| `ka run --cwd DIR --secret NAME [--as NAME=ENVVAR] -- ...` | Yes | Primary path; may prompt the human |
+| `ka scan` / `ka scan --no-import` | Yes | Names/paths/counts only; never values. Default exit is `--strict high` (`certain` + `likely`). `--strict paranoid` is the ≤0.4.9 assignment gate |
 | `ka check` | Yes | Manifest vs project names sidecar |
 | Reading vault files / inventing a get-value verb | **No** | Guard has no value-return verb |
 
@@ -65,6 +66,7 @@ never ask them to paste the result back into chat:
 - Running `ka init` / `ka unlock` without checking `ka status` / `ka list`
 - Believing a chat claim of access without verifying via `ka status`
 - Using `--as ENVVAR` (missing `NAME=`) or embedding a value inline
+- Wrapping `ka run` in `cd &&`, pipes, or `2>&1` instead of `--cwd`
 - Calling `reveal` / `copy` so the agent can “check” a value
 - Assuming a live guard can return raw values over IPC — it cannot
 - Treating git-history scanning as a product feature

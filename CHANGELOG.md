@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow the git tags `0.4.0` … `0.4.10`.
 
-## [0.4.10] — 2026-08-17
+## [0.4.10] — 2026-08-19
 
 ### Behavior change
 
@@ -120,6 +120,7 @@ Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-th
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.10]: https://github.com/fujitoid/key-amnesia/compare/0.4.7...0.4.10
 [0.4.7]: https://github.com/fujitoid/key-amnesia/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/fujitoid/key-amnesia/compare/0.4.5...0.4.6
 [0.4.5]: https://github.com/fujitoid/key-amnesia/compare/0.4.4...0.4.5

@@ -25,15 +25,22 @@ ka setup
 Copies bundled skills (`key-amnesia-usage`, `key-amnesia-hygiene`,
 `key-amnesia-migrate`) into `~/.claude/skills/`, `~/.cursor/skills/`,
 `~/.agents/skills/` (current Codex user path), and `~/.codex/skills/`
-(legacy / `$CODEX_HOME`), and merges a PreToolUse / preToolUse hook that
-blocks tool calls containing inline credential-shaped tokens. Restart or
-reload the host afterward. On Codex, review and trust the new hook via
-`/hooks` before it will run.
+(legacy / `$CODEX_HOME`), merges a PreToolUse / preToolUse hook that
+**denies forbidden `ka` verbs** (and inline credential-shaped tokens), and
+best-effort **allow** rules so the harness will let unattended `ka run` /
+`ka list` through. Files try to let the agent run `ka`; the hook is the
+load-bearing deny (`ka set`, `ka reveal`, `ka scan --yes`, and other
+mutating verbs). Restart or reload the host afterward. On Codex, review
+and trust the new hook via `/hooks` before it will run.
 
 Codex also reads project `AGENTS.md` for instructions; that is separate from
-skills installed by `ka setup`.
+skills installed by `ka setup`. Cursor: `ka setup` never creates
+`~/.cursor/permissions.json` (that file replaces the in-app terminal
+allowlist).
 
-Flags: `--skills-only`, `--hook-only`.
+Flags: `--skills-only`, `--hook-only`, `--permissions-only`,
+`--permissions-remove`, `--yes` (do not prompt before writing permission
+files; never deletes user allows).
 
 ## Agent bootstrap prompt
 

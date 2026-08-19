@@ -1,4 +1,4 @@
-**Docs** *(as of 0.4.5)*
+**Docs** *(as of 0.4.10)*
 
 - [Home](Home)
 - [Why not `.env`](Why-not-dotenv)
