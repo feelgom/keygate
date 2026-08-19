@@ -291,63 +291,48 @@ def scan_text_for_leaks(text: str) -> tuple[list[str], str | None]:
     return hits.likely_names, hits.prefix
 
 
-def _strings_from_decoded_json(obj: Any) -> list[str]:
-    """Collect strings from a decoded JSON value; unwrap one nested JSON string."""
-    out: list[str] = []
-    for s in collect_strings(obj):
-        out.append(s)
-        if not looks_like_json_container(s):
-            continue
-        try:
-            nested = json.loads(s)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(nested, (dict, list)):
-            out.extend(collect_strings(nested))
-    return out
-
-
 def _apply_secret_keys(acc: HitSet, node: Any) -> None:
     """Classify secret-named dict keys that never appear as ASSIGN text."""
     for key, val in iter_secret_keyed_strings(node):
         extra = HitSet()
         tier, reason = classify_value(val)
-        if tier == "likely":
-            extra.likely_names = [key]
-            if reason:
-                extra.likely_reasons = [reason]
-                extra.likely_reason_counts = {reason: 1}
-        elif tier == "possible":
-            extra.possible_names = [key]
-            if reason:
-                extra.possible_reasons = [reason]
-                extra.possible_reason_counts = {reason: 1}
-        else:
+        if tier not in ("likely", "possible"):
             continue
+        extra.record_assignment(key, tier, [reason] if reason else [])
         acc.merge(extra)
 
 
 def _scan_transcript_payload(obj: Any) -> HitSet:
     """Run detectors on string payloads and secret-named JSON keys.
 
-    String scan unwraps one nested JSON string via ``_strings_from_decoded_json``
-    and does not re-walk those strings. Secret-key walk still covers dict keys
-    that never appear as ASSIGN text (including keys inside the unwrapped
-    object). Never returns values.
+    JSON-container strings are unwrapped once and not run through
+    ``scan_text_hits`` (ASSIGN on serialized JSON plus a secret-key walk
+    would double-count). Non-JSON strings are scanned. Secret-key walk
+    covers dict keys that never appear as ASSIGN text. Never returns values.
     """
     acc = HitSet()
     nested_objs: list[Any] = []
-    for s in collect_strings(obj):
-        if looks_like_json_container(s):
-            try:
-                nested = json.loads(s)
-            except json.JSONDecodeError:
-                nested = None
-            if isinstance(nested, (dict, list)):
-                nested_objs.append(nested)
 
-    for s in _strings_from_decoded_json(obj):
-        acc.merge(scan_text_hits(s))
+    def _ingest_strings(node: Any) -> None:
+        for s in collect_strings(node):
+            if looks_like_json_container(s):
+                try:
+                    nested = json.loads(s)
+                except json.JSONDecodeError:
+                    nested = None
+                if isinstance(nested, (dict, list)):
+                    nested_objs.append(nested)
+                    continue
+            acc.merge(scan_text_hits(s))
+
+    _ingest_strings(obj)
+    # One-level unwrap: inner strings of parsed JSON containers, not the
+    # container text itself (already skipped above).
+    for nested in list(nested_objs):
+        for s in collect_strings(nested):
+            if looks_like_json_container(s):
+                continue
+            acc.merge(scan_text_hits(s))
 
     _apply_secret_keys(acc, obj)
     for nested in nested_objs:
@@ -577,18 +562,25 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
                 confidence="certain",
             )
         )
-    if likely_lines:
+    if likely_lines or likely_names:
+        if likely_lines:
+            likely_reason = (
+                f"agent session transcript: {len(likely_lines)} line(s) with "
+                "likely assignment-shaped content (advisory; false "
+                "positives/negatives expected)"
+            )
+        else:
+            likely_reason = (
+                "agent session transcript: likely assignment-shaped names "
+                "on higher-confidence lines"
+            )
         out.append(
             Finding(
                 path=str(path),
                 kind="agent_session_transcript",
                 secret_names=likely_names,
                 secret_count=len(likely_lines),
-                reason=(
-                    f"agent session transcript: {len(likely_lines)} line(s) with "
-                    "likely assignment-shaped content (advisory; false "
-                    "positives/negatives expected)"
-                ),
+                reason=likely_reason,
                 importable=False,
                 scope=scope,
                 hit_lines=likely_lines,
@@ -598,7 +590,6 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
             )
         )
     if possible_lines or possible_names:
-        count = len(possible_lines) if possible_lines else max(len(possible_names), 1)
         if possible_lines:
             poss_reason = (
                 f"agent session transcript: {len(possible_lines)} line(s) with "
@@ -614,7 +605,7 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
                 path=str(path),
                 kind="agent_session_transcript",
                 secret_names=possible_names,
-                secret_count=count,
+                secret_count=len(possible_lines),
                 reason=poss_reason,
                 importable=False,
                 scope=scope,
@@ -659,12 +650,13 @@ def _findings_for_path(path: Path, *, scope: str) -> list[Finding]:
                     )
                 ]
             # Unrecognised shape: demote to possible, do not drop.
+            # Presence/shape finding: one per file, not per top-level key.
             return [
                 Finding(
                     path=str(path),
                     kind=kind,
                     secret_names=names,
-                    secret_count=count,
+                    secret_count=1,
                     reason=(
                         "unconfirmed MCP config shape (no top-level "
                         "mcpServers/servers)"
@@ -673,7 +665,7 @@ def _findings_for_path(path: Path, *, scope: str) -> list[Finding]:
                     scope=scope,
                     confidence="possible",
                     reasons=[REASON_UNCONFIRMED_MCP],
-                    reason_counts={REASON_UNCONFIRMED_MCP: count},
+                    reason_counts={REASON_UNCONFIRMED_MCP: 1},
                 )
             ]
         elif kind in (".npmrc", ".pypirc"):
@@ -1065,7 +1057,14 @@ def format_human_report(
         )
         lines.append("")
     gated = gated_confidences(strict)
-    listed = [f for f in findings if f.confidence in gated]
+    listed = [
+        f
+        for f in findings
+        if f.confidence in gated
+        and not (
+            f.secret_count == 0 and f.kind == "agent_session_transcript"
+        )
+    ]
     if not listed:
         lines.append(
             "No locally exposed agent keys found under default exclusions."

@@ -17,7 +17,7 @@ Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-th
 - Shared detector module (`key_amnesia.detect`) with explicit tiers: `none` / `possible` / `likely` / `prefix`. Hook still denies `possible|likely|prefix` except function-call and `Name[...]` type-annotation values.
 - `ka scan --strict` with values `certain`, `high`, or `paranoid` (default `high`). `--wide` aliases `--include-excluded` and is independent of `--deep`.
 - Quoted-name assignments (`"api_key": "…"`) and JSON key walk for transcripts.
-- Named reasons on findings (`uuid`, `identifier`, `word-shaped-passphrase`, `low-transition`, `unconfirmed-mcp-shape`). Unconfirmed `mcp.json` / `claude_desktop_config.json` demote to possible; they are not dropped.
+- Named reasons on findings (`uuid`, `identifier`, `word-shaped-passphrase`, `low-transition`, `unconfirmed-mcp-shape`). Unconfirmed `mcp.json` / `claude_desktop_config.json` demote to possible; they are not dropped. Unconfirmed MCP is one possible per file, not per top-level key.
 
 ### Changed
 

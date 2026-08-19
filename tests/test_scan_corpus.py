@@ -398,15 +398,39 @@ def test_transcript_mixed_line_records_possible_names(tmp_path: Path) -> None:
     )
     path.write_text(line + "\n", encoding="utf-8")
     findings = _findings_for_transcript(path, scope="deep")
-    assert leak_count(findings) >= 1
-    assert possible_count(findings) > 0
     high = [f for f in findings if f.confidence in ("certain", "likely")]
     poss = [f for f in findings if f.confidence == "possible"]
     assert high and high[0].hit_lines == [1]
     assert poss
     assert poss[0].hit_lines == []
-    assert transcript_line_hit_count(findings) == high[0].secret_count
+    assert poss[0].secret_count == 0
     assert any(n.upper() == "TOKEN" for n in poss[0].secret_names)
+    assert leak_count(findings) == 1
+    assert leak_count(findings, strict="paranoid") == 1
+    assert possible_count(findings) == 0
+    assert transcript_line_hit_count(findings) == high[0].secret_count
+
+
+def test_transcript_prefix_and_likely_same_line_keeps_likely_names(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "prefix-likely.jsonl"
+    prefix = "sk-" + "a" * 25
+    line = json.dumps(
+        {
+            "type": "user",
+            "content": f'{prefix}\napi_key = "{_GEN_MIXED}"',
+        }
+    )
+    path.write_text(line + "\n", encoding="utf-8")
+    findings = _findings_for_transcript(path, scope="deep")
+    certain = [f for f in findings if f.confidence == "certain"]
+    likely = [f for f in findings if f.confidence == "likely"]
+    assert certain and certain[0].secret_count == 1
+    assert likely
+    assert any(n.upper() == "API_KEY" for n in likely[0].secret_names)
+    assert likely[0].secret_count == 0
+    assert leak_count(findings, strict="high") == 1
 
 
 def test_uuid_assignment_is_likely_with_reason(ka_home, tmp_path, monkeypatch, capsys) -> None:
@@ -452,7 +476,18 @@ def test_mcp_json_unrecognised_shape_demotes_not_dropped(ka_home, tmp_path) -> N
     assert len(mcp) == 2
     assert all(f.confidence == "possible" for f in mcp)
     assert all(REASON_UNCONFIRMED_MCP in f.reasons for f in mcp)
-    assert possible_count(findings) >= 2
+    assert possible_count(findings) == 2
+
+    (tree / "mcp.json").write_text(
+        '{"alpha": 1, "beta": 2, "gamma": 3}\n', encoding="utf-8"
+    )
+    findings = scan_project(tree)
+    fat = [f for f in findings if Path(f.path).name == "mcp.json"]
+    assert fat and fat[0].confidence == "possible"
+    assert fat[0].secret_count == 1
+    assert fat[0].reason_counts.get(REASON_UNCONFIRMED_MCP) == 1
+    assert len(fat[0].secret_names) == 3
+    assert possible_count(findings) == 2
 
     (tree / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
     findings = scan_project(tree)
@@ -483,6 +518,21 @@ def test_nested_jsonl_secret_key_walk_and_timing(tmp_path: Path) -> None:
     assert any(
         n.upper() == "API_KEY" for f in findings for n in f.secret_names
     )
+
+    generated = str(uuid.uuid4())
+    while generated.strip("0-") == "":
+        generated = str(uuid.uuid4())
+    wrapped = tmp_path / "wrapped.jsonl"
+    wrapped.write_text(
+        json.dumps({"content": json.dumps({"api_key": generated})}) + "\n",
+        encoding="utf-8",
+    )
+    wrapped_findings = _findings_for_transcript(wrapped, scope="deep")
+    likely = [f for f in wrapped_findings if f.confidence == "likely"]
+    assert leak_count(wrapped_findings) == 1
+    assert likely
+    assert likely[0].reason_counts.get(REASON_UUID) == 1
+    assert sum(1 for n in likely[0].secret_names if n.upper() == "API_KEY") == 1
 
     bulky = tmp_path / "bulky.jsonl"
     inner = {

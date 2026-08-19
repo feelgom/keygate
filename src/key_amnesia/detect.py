@@ -195,44 +195,69 @@ class HitSet:
     possible_reasons: list[str] = field(default_factory=list)
     likely_reason_counts: dict[str, int] = field(default_factory=dict)
     possible_reason_counts: dict[str, int] = field(default_factory=dict)
+    # upper(name) -> (original_name, reasons). Source of truth for merge.
+    _likely_by_name: dict[str, tuple[str, list[str]]] = field(default_factory=dict)
+    _possible_by_name: dict[str, tuple[str, list[str]]] = field(default_factory=dict)
+
+    def _rebuild(self) -> None:
+        self.likely_names = [pair[0] for pair in self._likely_by_name.values()]
+        self.possible_names = [pair[0] for pair in self._possible_by_name.values()]
+        self.likely_reasons = []
+        self.likely_reason_counts = {}
+        for _name, reasons in self._likely_by_name.values():
+            for reason in reasons:
+                if not reason:
+                    continue
+                if reason not in self.likely_reasons:
+                    self.likely_reasons.append(reason)
+                self.likely_reason_counts[reason] = (
+                    self.likely_reason_counts.get(reason, 0) + 1
+                )
+        self.possible_reasons = []
+        self.possible_reason_counts = {}
+        for _name, reasons in self._possible_by_name.values():
+            for reason in reasons:
+                if not reason:
+                    continue
+                if reason not in self.possible_reasons:
+                    self.possible_reasons.append(reason)
+                self.possible_reason_counts[reason] = (
+                    self.possible_reason_counts.get(reason, 0) + 1
+                )
+
+    def record_assignment(self, name: str, tier: str, reasons: list[str]) -> None:
+        """Highest-wins per name. Does not record values."""
+        key = name.upper()
+        if tier == "likely":
+            if key in self._likely_by_name:
+                return
+            self._possible_by_name.pop(key, None)
+            self._likely_by_name[key] = (name, list(reasons))
+        elif tier == "possible":
+            if key in self._likely_by_name or key in self._possible_by_name:
+                return
+            self._possible_by_name[key] = (name, list(reasons))
+        else:
+            return
+        self._rebuild()
 
     def merge(self, extra: HitSet) -> None:
-        seen_l = {n.upper() for n in self.likely_names}
-        seen_p = {n.upper() for n in self.possible_names}
-        for name in extra.likely_names:
-            key = name.upper()
-            if key in seen_l:
+        for key, pair in extra._likely_by_name.items():
+            if key in self._likely_by_name:
                 continue
-            seen_l.add(key)
-            self.likely_names.append(name)
-            seen_p.discard(key)
-            self.possible_names[:] = [n for n in self.possible_names if n.upper() != key]
-        for name in extra.possible_names:
-            key = name.upper()
-            if key in seen_l or key in seen_p:
+            self._possible_by_name.pop(key, None)
+            self._likely_by_name[key] = (pair[0], list(pair[1]))
+        for key, pair in extra._possible_by_name.items():
+            if key in self._likely_by_name or key in self._possible_by_name:
                 continue
-            seen_p.add(key)
-            self.possible_names.append(name)
+            self._possible_by_name[key] = (pair[0], list(pair[1]))
         if extra.prefix and self.prefix is None:
             self.prefix = extra.prefix
         if extra.bearer_likely:
             self.bearer_likely = True
         if extra.bearer_possible:
             self.bearer_possible = True
-        for reason in extra.likely_reasons:
-            if reason not in self.likely_reasons:
-                self.likely_reasons.append(reason)
-        for reason in extra.possible_reasons:
-            if reason not in self.possible_reasons:
-                self.possible_reasons.append(reason)
-        for reason, n in extra.likely_reason_counts.items():
-            self.likely_reason_counts[reason] = (
-                self.likely_reason_counts.get(reason, 0) + n
-            )
-        for reason, n in extra.possible_reason_counts.items():
-            self.possible_reason_counts[reason] = (
-                self.possible_reason_counts.get(reason, 0) + n
-            )
+        self._rebuild()
 
 
 def entropy(s: str) -> float:
@@ -467,22 +492,7 @@ def scan_text_hits(text: str) -> HitSet:
             prev_reasons.append(reason)
 
     for tier, name, reasons in chosen.values():
-        if tier == "likely":
-            hits.likely_names.append(name)
-            for reason in reasons:
-                if reason not in hits.likely_reasons:
-                    hits.likely_reasons.append(reason)
-                hits.likely_reason_counts[reason] = (
-                    hits.likely_reason_counts.get(reason, 0) + 1
-                )
-        else:
-            hits.possible_names.append(name)
-            for reason in reasons:
-                if reason not in hits.possible_reasons:
-                    hits.possible_reasons.append(reason)
-                hits.possible_reason_counts[reason] = (
-                    hits.possible_reason_counts.get(reason, 0) + 1
-                )
+        hits.record_assignment(name, tier, reasons)
 
     return hits
 
