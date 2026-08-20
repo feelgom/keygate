@@ -2,7 +2,22 @@
 
 All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions follow the git tags `0.4.0` … `0.4.10`.
+Versions follow the git tags `0.4.0` … `0.4.11`.
+
+## [0.4.11] — 2026-08-20
+
+### Behavior change
+
+- `ka scan` headline location follows gated `Finding.scope`. All-project (and the zero case) still says `in this project`. All-deep says `on this machine, outside this project`. Mixed says `on this machine — {here} in this project, {away} outside it`. `Project root:` is printed only when a listed finding is in the project.
+
+### Fixed
+
+- Assignment matching no longer runs the unanchored `ASSIGN` regex (quadratic, and a denial-of-service surface: transcript strings are attacker-influenced). Production uses a literal-anchored two-stage matcher; finding identity is unchanged. Vendor-prefix detection gates on one combined regex, then still picks the kind from `PREFIX_PATTERNS` order.
+
+### Added
+
+- `ka scan --deep` writes progress to stderr (TTY: one rewritten line; otherwise plain lines). `--quiet` suppresses it. `--json` stdout stays pipeable.
+- Human report (and JSON `strict_certain` / `strict_high` / `strict_paranoid`) prints the three `--strict` gate totals from the same scan.
 
 ## [0.4.10] — 2026-08-19
 
@@ -120,6 +135,7 @@ Finding counts from ≤0.4.9 are **not comparable**: 0.4.9 counted every hook-th
 
 - Kernel peer-identity admission on macOS remains fail-closed (unchanged). Other non-Win/Linux/Darwin platforms still fail closed.
 
+[0.4.11]: https://github.com/fujitoid/key-amnesia/compare/0.4.10...0.4.11
 [0.4.10]: https://github.com/fujitoid/key-amnesia/compare/0.4.7...0.4.10
 [0.4.7]: https://github.com/fujitoid/key-amnesia/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/fujitoid/key-amnesia/compare/0.4.5...0.4.6

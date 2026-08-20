@@ -53,6 +53,7 @@ ka scan --deep        # + home/shell/MCP paths
 ka scan --json        # machine-readable; report-only
 ka scan --strict paranoid   # also exit 1 on identifier/passphrase-shaped hits
 ka scan --wide        # include default-excluded dirs
+ka scan --quiet       # no --deep progress on stderr
 ka scan --yes         # import all importable dotenv hits (password still required)
 ```
 

@@ -31,9 +31,11 @@ ka scan --deep                # home/shell/MCP + agent session transcripts
 ka scan --strict paranoid     # ≤0.4.9 assignment gate
 ```
 
-The headline looks like: `N LEAKs found (--strict high) — your agent can read N secrets in
-this project (LEAK = Locally Exposed Agent Keys)`. A three-count summary
-(`N certain · N likely · N possible`) always follows; only the listing and
+The headline names the `--strict` gate and where the gated findings are:
+`in this project`, or `on this machine, outside this project` when `--deep`
+hits are only outside the tree (mixed: both counts). A three-count summary
+(`N certain · N likely · N possible`) always follows, then the three gate
+totals (`--strict certain` / `high` / `paranoid`). Only the listing and
 exit follow `--strict`. Names, paths, and counts only — never values. After the
 report you can store selected dotenv findings into a project vault (TTY
 import path), or migrate a known file with `ka import`.

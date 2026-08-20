@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -72,6 +73,12 @@ _MAX_CONTENT_BYTES = 256_000
 
 # Skip oversized session transcripts (line-iter still; refuse open if huge).
 _MAX_TRANSCRIPT_BYTES = 100 * 1024 * 1024
+
+# Intra-file --deep progress: tick every N JSONL lines so a single huge
+# transcript cannot freeze stderr on a per-file counter.
+_PROGRESS_LINE_EVERY = 2000
+
+ProgressFn = Callable[[str, int, int], None]
 
 # Cap human-report line lists; full list remains in ``--json``.
 _HIT_LINES_DISPLAY_CAP = 20
@@ -457,7 +464,12 @@ def _inline_findings(
     return out
 
 
-def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
+def _findings_for_transcript(
+    path: Path,
+    *,
+    scope: str,
+    progress: ProgressFn | None = None,
+) -> list[Finding]:
     """Scan one JSONL session transcript; names/paths/line hits only."""
     try:
         size = path.stat().st_size
@@ -483,6 +495,11 @@ def _findings_for_transcript(path: Path, *, scope: str) -> list[Finding]:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line_no, raw in enumerate(fh, start=1):
+                if (
+                    progress is not None
+                    and line_no % _PROGRESS_LINE_EVERY == 0
+                ):
+                    progress(path.name, line_no, 0)
                 line = raw.strip()
                 if not line:
                     continue
@@ -845,7 +862,11 @@ def _deep_candidate_paths(home: Path | None = None) -> list[Path]:
     return candidates
 
 
-def scan_deep(home: Path | None = None) -> list[Finding]:
+def scan_deep(
+    home: Path | None = None,
+    *,
+    progress: ProgressFn | None = None,
+) -> list[Finding]:
     """Scan known home / shell / MCP / agent-transcript locations.
 
     Not a full home tree walk — fixed candidates plus known transcript globs.
@@ -875,7 +896,11 @@ def scan_deep(home: Path | None = None) -> list[Finding]:
                 continue
             findings.append(finding)
 
-    for path in iter_agent_transcript_files(home):
+    transcripts = list(iter_agent_transcript_files(home))
+    n_transcripts = len(transcripts)
+    for i, path in enumerate(transcripts, start=1):
+        if progress is not None:
+            progress("agent transcripts", i, n_transcripts)
         try:
             key = str(path.resolve())
         except OSError:
@@ -883,7 +908,9 @@ def scan_deep(home: Path | None = None) -> list[Finding]:
         if key in seen:
             continue
         seen.add(key)
-        for finding in _findings_for_transcript(path, scope="deep"):
+        for finding in _findings_for_transcript(
+            path, scope="deep", progress=progress
+        ):
             seen.add(finding.path)
             findings.append(finding)
 
@@ -931,16 +958,36 @@ def transcript_line_hit_count(findings: list[Finding]) -> int:
 def headline(
     findings: list[Finding],
     *,
-    project_label: str = "this project",
     strict: str = STRICT_HIGH,
 ) -> str:
     n = leak_count(findings, strict=strict)
     unit = "LEAK" if n == 1 else "LEAKs"
     return (
         f"{n} {unit} found (--strict {strict}) — your agent can read {n} secret"
-        f"{'' if n == 1 else 's'} in {project_label} "
+        f"{'' if n == 1 else 's'} {_location_clause(findings, strict=strict)} "
         f"(LEAK = Locally Exposed Agent Keys)"
     )
+
+
+def _location_clause(findings: list[Finding], *, strict: str) -> str:
+    gated = gated_confidences(strict)
+    here = sum(
+        max(f.secret_count, 0)
+        for f in findings
+        if f.confidence in gated and f.scope == "project"
+    )
+    away = sum(
+        max(f.secret_count, 0)
+        for f in findings
+        if f.confidence in gated and f.scope != "project"
+    )
+    if away and not here:
+        return "on this machine, outside this project"
+    if away and here:
+        return (
+            f"on this machine — {here} in this project, {away} outside it"
+        )
+    return "in this project"
 
 
 def _reason_bucket_counts(findings: list[Finding]) -> dict[str, int]:
@@ -997,6 +1044,17 @@ def format_count_summary(findings: list[Finding]) -> str:
     return f"{base} ({' · '.join(parts)})"
 
 
+def format_gate_totals(findings: list[Finding]) -> str:
+    """Always-printed --strict certain / high / paranoid totals."""
+    width = max(len(STRICT_CERTAIN), len(STRICT_HIGH), len(STRICT_PARANOID))
+    rows = (
+        (STRICT_CERTAIN, leak_count(findings, strict=STRICT_CERTAIN)),
+        (STRICT_HIGH, leak_count(findings, strict=STRICT_HIGH)),
+        (STRICT_PARANOID, leak_count(findings, strict=STRICT_PARANOID)),
+    )
+    return "\n".join(f"--strict {name:<{width}}  {n}" for name, n in rows)
+
+
 def findings_to_json(
     findings: list[Finding],
     *,
@@ -1010,6 +1068,9 @@ def findings_to_json(
         "certain_count": certain_count(findings),
         "likely_count": likely_count(findings),
         "possible_count": possible_count(findings),
+        "strict_certain": leak_count(findings, strict=STRICT_CERTAIN),
+        "strict_high": leak_count(findings, strict=STRICT_HIGH),
+        "strict_paranoid": leak_count(findings, strict=STRICT_PARANOID),
         "transcript_line_hits": transcript_hits,
         "headline": headline(findings, strict=strict),
         "strict": strict,
@@ -1047,6 +1108,8 @@ def format_human_report(
         "",
         format_count_summary(findings),
         "",
+        format_gate_totals(findings),
+        "",
     ]
     transcript_hits = transcript_line_hit_count(findings)
     if transcript_hits:
@@ -1070,8 +1133,9 @@ def format_human_report(
             "No locally exposed agent keys found under default exclusions."
         )
         return "\n".join(lines)
-    lines.append(f"Project root: {project_root}")
-    lines.append("")
+    if any(f.scope == "project" for f in listed):
+        lines.append(f"Project root: {project_root}")
+        lines.append("")
     for i, f in enumerate(listed, start=1):
         names = ", ".join(f.secret_names) if f.secret_names else "(filename/presence)"
         extra_reasons = ""
