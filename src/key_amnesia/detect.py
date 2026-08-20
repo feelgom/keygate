@@ -132,6 +132,10 @@ BEARER = re.compile(r"\bBearer\s+([A-Za-z0-9._\-+=/]{16,})", re.IGNORECASE)
 # ENV-style / JSON / YAML / TOML assignments. Optional dotted prefix
 # (secrets.api_key) is not part of the captured name. Optional matching
 # quotes around the name so `"api_key": "…"` matches.
+#
+# Kept for the 0.4.11 differential test. Production matching uses
+# ``_iter_assignments`` (literal-anchored, linear). Do not call ASSIGN
+# from scan/hook paths — it is quadratic on long identifier runs.
 ASSIGN = re.compile(
     r"""(?ix)
     (?:[A-Za-z_][A-Za-z0-9_]*\.)*
@@ -144,6 +148,27 @@ ASSIGN = re.compile(
     (?P=q)
     """
 )
+
+# ASCII only. str.isalnum() is Unicode-aware: accented Latin, Cyrillic and
+# CJK all answer True, so using it here would capture names the old
+# [a-z0-9] class never did.
+_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
+# Bound the leftward walk, or a long alphanumeric run before each keyword
+# reintroduces the quadratic behaviour this rewrite exists to remove.
+_MAX_NAME_PREFIX = 256
+
+_ASSIGN_KEYWORD = re.compile(
+    r"(?i)(?:api[_-]?key|token|secret|password|passwd|private[_-]?key)"
+)
+_ASSIGN_TAIL = re.compile(
+    r"""(?P<nq2>['"]?)\s*[:=]\s*(?P<q>['"]?)(?P<value>[^\s'"]{8,})(?P<q2>['"]?)"""
+)
+
+# One-pass gate: any vendor prefix. Kind is still chosen by PREFIX_PATTERNS
+# order (not leftmost match) so reported secret_names stay stable.
+_ANY_PREFIX = re.compile("|".join(p.pattern for _kind, p in PREFIX_PATTERNS))
 
 _SECRET_NAME = re.compile(
     r"(?ix)^(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|secret|password|passwd|private[_-]?key)$"
@@ -394,6 +419,8 @@ def assignment_is_secret(value: str) -> bool:
 
 
 def find_prefix_kind(text: str) -> str | None:
+    if not text or not _ANY_PREFIX.search(text):
+        return None
     for kind, pattern in PREFIX_PATTERNS:
         if pattern.search(text):
             return kind
@@ -426,8 +453,40 @@ def find_secret_kind(text: str) -> str | None:
     return None
 
 
-def iter_assignment_matches(text: str) -> Iterator[re.Match[str]]:
-    yield from ASSIGN.finditer(text)
+def _iter_assignments(text: str) -> Iterator[tuple[str, str]]:
+    """Yield (name, value) pairs equivalent to ASSIGN, in linear time.
+
+    Never logs or returns values to callers outside scan_text_hits.
+    """
+    if not text:
+        return
+    for kw in _ASSIGN_KEYWORD.finditer(text):
+        i = kw.start()
+        floor = max(0, i - _MAX_NAME_PREFIX)
+        while i > floor and text[i - 1] in "_-":
+            j = i - 1
+            while j > floor and text[j - 1] in _NAME_CHARS:
+                j -= 1
+            if j == i - 1:
+                break
+            i = j
+        tail = _ASSIGN_TAIL.match(text, kw.end())
+        if tail is None:
+            continue
+        # Old ASSIGN's (?P=nq) only pairs quotes that are *in the match*.
+        # A quote immediately before the name is often JSON wrapping
+        # (`"token = …"`), not a quoted key. Require an opener only when
+        # the tail itself captured a post-name quote (`"api_key":`).
+        nq2 = tail.group("nq2") or ""
+        if nq2 and (i == 0 or text[i - 1] != nq2):
+            continue
+        # Value quotes: old ASSIGN requires a closer only when the opener
+        # was captured. An unquoted value may be followed by a JSON `"`.
+        q = tail.group("q") or ""
+        q2 = tail.group("q2") or ""
+        if q and q2 != q:
+            continue
+        yield text[i : kw.end()], tail.group("value")
 
 
 def collect_strings(obj: Any) -> Iterable[str]:
@@ -475,10 +534,9 @@ def scan_text_hits(text: str) -> HitSet:
 
     # key -> (tier, original_name, reasons)
     chosen: dict[str, tuple[str, str, list[str]]] = {}
-    for match in ASSIGN.finditer(text):
-        name = match.group("name")
+    for name, value in _iter_assignments(text):
         key = name.upper()
-        tier, reason = classify_value(match.group("value"))
+        tier, reason = classify_value(value)
         if tier not in ("likely", "possible"):
             continue
         prev = chosen.get(key)

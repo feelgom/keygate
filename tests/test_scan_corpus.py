@@ -19,6 +19,7 @@ import pytest
 
 from key_amnesia.cli import main
 from key_amnesia.detect import (
+    ASSIGN,
     NAMED_WEAKENING_FUNCTION_CALL,
     NAMED_WEAKENING_IDENTIFIER,
     NAMED_WEAKENING_LOW_TRANSITION,
@@ -27,6 +28,7 @@ from key_amnesia.detect import (
     NAMED_WEAKENINGS,
     REASON_UNCONFIRMED_MCP,
     REASON_UUID,
+    _iter_assignments,
     classify_value,
     find_prefix_kind,
     find_secret_kind,
@@ -35,8 +37,10 @@ from key_amnesia.detect import (
 from key_amnesia.hooks import secret_guard as sg
 from key_amnesia.scan import (
     Finding,
+    _findings_for_path,
     _findings_for_transcript,
     format_count_summary,
+    format_gate_totals,
     headline,
     leak_count,
     possible_count,
@@ -623,6 +627,13 @@ def test_strict_headline_and_summary_example_shape() -> None:
     assert headline(findings, strict="paranoid").startswith(
         "32 LEAKs found (--strict paranoid)"
     )
+    gates = format_gate_totals(findings)
+    assert "--strict certain" in gates
+    assert "--strict high" in gates
+    assert "--strict paranoid" in gates
+    assert gates.splitlines()[0].endswith("1")
+    assert gates.splitlines()[1].endswith("4")
+    assert gates.splitlines()[2].endswith("32")
 
 
 def _summary_line(text: str) -> str:
@@ -681,3 +692,105 @@ def test_scan_help_has_strict_wide_not_unreleased_flags(capsys) -> None:
     assert "--show-possible" not in blob
     assert "--strict" in blob
     assert "--wide" in blob
+    assert "--quiet" in blob
+
+
+def _assign_name_and_len(text: str) -> list[tuple[str, int]]:
+    return [(name, len(value)) for name, value in _iter_assignments(text)]
+
+
+def _legacy_assign_name_and_len(text: str) -> list[tuple[str, int]]:
+    return [
+        (match.group("name"), len(match.group("value")))
+        for match in ASSIGN.finditer(text)
+    ]
+
+
+def _finding_sig(finding: Finding) -> tuple:
+    return (
+        finding.kind,
+        tuple(finding.secret_names),
+        finding.secret_count,
+        finding.confidence,
+        tuple(finding.reasons),
+        tuple(finding.hit_lines),
+        tuple(sorted(finding.reason_counts.items())),
+    )
+
+
+def test_assign_differential_corpus() -> None:
+    """New matcher must be finding-identical to ASSIGN on the labeled corpus."""
+    from key_amnesia import detect as detect_mod
+
+    orig = detect_mod._iter_assignments
+
+    def _legacy(text: str):
+        for match in ASSIGN.finditer(text):
+            yield match.group("name"), match.group("value")
+
+    for path in _iter_files(CORPUS):
+        text = path.read_text(encoding="utf-8")
+        assert _legacy_assign_name_and_len(text) == _assign_name_and_len(text), (
+            path.name
+        )
+        old_vals = [match.group("value") for match in ASSIGN.finditer(text)]
+        new_vals = [value for _name, value in _iter_assignments(text)]
+        if old_vals != new_vals:
+            pytest.fail(f"{path.name}: assignment value mismatch (values omitted)")
+
+        new_findings = [_finding_sig(f) for f in _findings_for_path(path, scope="project")]
+        detect_mod._iter_assignments = _legacy
+        try:
+            old_findings = [
+                _finding_sig(f) for f in _findings_for_path(path, scope="project")
+            ]
+        finally:
+            detect_mod._iter_assignments = orig
+        assert old_findings == new_findings, path.name
+
+
+def test_assign_rewrite_shapes() -> None:
+    v = _GEN_MIXED
+    assert _assign_name_and_len(f"secrets.api_key = {v}") == [("api_key", len(v))]
+    assert _assign_name_and_len(f"my_db_password: {v}") == [("my_db_password", len(v))]
+    assert _assign_name_and_len(f'"api_key": "{v}"') == [("api_key", len(v))]
+    assert _assign_name_and_len(f"api_key='{v}'") == [("api_key", len(v))]
+    assert _assign_name_and_len(f"API_KEY={v}") == [("API_KEY", len(v))]
+    # Opening quote without a closing name quote: old ASSIGN still matches
+    # from the keyword (nq empty). Value-side mismatch does not.
+    assert _assign_name_and_len(f'"api_key: {v}') == [("api_key", len(v))]
+    assert _assign_name_and_len(f"api_key=\"{v}'") == []
+    assert _assign_name_and_len(f"!api_key={v}") == [("api_key", len(v))]
+    assert _assign_name_and_len(f"café_token={v}") == [("token", len(v))]
+    assert _assign_name_and_len(f"secret_token={v}") == [("secret_token", len(v))]
+    hits = scan_text_hits(f"secret_token={v}")
+    assert [name.upper() for name in hits.likely_names] == ["SECRET_TOKEN"]
+
+
+def test_prefix_kind_follows_pattern_order_not_leftmost() -> None:
+    aws = "AKIAAAAAAAAAAAAAAAAA"
+    openai = "sk-" + ("a" * 24)
+    text = aws + " then " + openai
+    assert find_prefix_kind(text) == "OpenAI-style key"
+    assert scan_text_hits(text).prefix == "OpenAI-style key"
+
+
+def test_assign_blowup_dotted_run_under_one_second() -> None:
+    n = (256 * 1024) // 12
+    text = ("a1234567890." * n) + "token"
+    t0 = time.perf_counter()
+    consumed = list(_iter_assignments(text))
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0
+    assert consumed == []
+
+
+def test_assign_blowup_alnum_prefix_under_one_second() -> None:
+    unit = ("a" * 4000) + "_token="
+    n = max(1, (256 * 1024) // len(unit))
+    text = unit * n
+    t0 = time.perf_counter()
+    list(_iter_assignments(text))
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0
+

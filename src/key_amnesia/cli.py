@@ -239,6 +239,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Report only; never offer to store findings in the vault",
     )
+    p_scan.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress --deep progress on stderr (stdout is unchanged)",
+    )
 
     # run
     p_run = sub.add_parser(
@@ -1084,6 +1089,39 @@ def _scan_import_into_project(
     return 0
 
 
+def _scan_progress_printer() -> tuple[Any, Any]:
+    """Stderr progress for ``ka scan --deep``. Never writes file contents."""
+    last_len = 0
+    try:
+        tty = bool(sys.stderr.isatty())
+    except Exception:
+        tty = False
+
+    def progress(stage: str, done: int, total: int) -> None:
+        nonlocal last_len
+        if total > 0:
+            msg = f"{stage} {done}/{total}"
+        else:
+            msg = f"{stage} {done}"
+        if tty:
+            pad = max(0, last_len - len(msg))
+            sys.stderr.write("\r" + msg + (" " * pad))
+            sys.stderr.flush()
+            last_len = len(msg)
+        else:
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+
+    def finish() -> None:
+        nonlocal last_len
+        if tty and last_len:
+            sys.stderr.write("\r" + (" " * last_len) + "\r")
+            sys.stderr.flush()
+            last_len = 0
+
+    return progress, finish
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """``ka scan``: find LEAK (Locally Exposed Agent Keys) under cwd.
 
@@ -1101,14 +1139,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
         project_root,
         include_excluded=bool(getattr(args, "include_excluded", False)),
     )
-    if getattr(args, "deep", False):
-        # Avoid double-counting files already seen under the project tree
-        # when cwd is inside home.
-        seen = {f.path for f in findings}
-        for f in scan_mod.scan_deep():
-            if f.path not in seen:
-                findings.append(f)
-                seen.add(f.path)
+    progress = None
+    finish_progress = None
+    if getattr(args, "deep", False) and not bool(getattr(args, "quiet", False)):
+        progress, finish_progress = _scan_progress_printer()
+    try:
+        if getattr(args, "deep", False):
+            # Avoid double-counting files already seen under the project tree
+            # when cwd is inside home.
+            seen = {f.path for f in findings}
+            for f in scan_mod.scan_deep(progress=progress):
+                if f.path not in seen:
+                    findings.append(f)
+                    seen.add(f.path)
+    finally:
+        if finish_progress is not None:
+            finish_progress()
 
     as_json = bool(getattr(args, "json", False))
     strict = getattr(args, "strict", "high") or "high"

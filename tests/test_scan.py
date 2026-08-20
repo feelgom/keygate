@@ -19,6 +19,7 @@ from key_amnesia.project import ensure_project_scaffold, project_vault_path
 from key_amnesia.scan import (
     DEFAULT_EXCLUDE_DIR_NAMES,
     Finding,
+    format_human_report,
     headline,
     importable_findings,
     iter_agent_transcript_files,
@@ -56,6 +57,9 @@ def test_scan_finds_dotenv_names_not_values(ka_home, project_dir, capsys) -> Non
     assert data["possible_count"] == 0
     assert data["certain_count"] == 2
     assert data["likely_count"] == 0
+    assert data["strict_certain"] == 2
+    assert data["strict_high"] == 2
+    assert data["strict_paranoid"] == 2
     assert data["findings"][0]["confidence"] == "certain"
     assert "LEAK" in data["headline"]
     assert "--strict high" in data["headline"]
@@ -81,6 +85,8 @@ def test_scan_clean_tree_exits_zero(ka_home, project_dir, capsys) -> None:
     assert rc == 0
     assert "--strict high" in out
     assert "0 certain · 0 likely · 0 possible" in out
+    assert "--strict certain" in out
+    assert "--strict paranoid" in out
     assert "LEAK" in out
 
 
@@ -197,8 +203,73 @@ def test_scan_headline_wording() -> None:
     ]
     text = headline(findings)
     assert text.startswith("2 LEAKs found (--strict high)")
-    assert "your agent can read 2 secrets" in text
+    assert "your agent can read 2 secrets in this project" in text
     assert "Locally Exposed Agent Keys" in text
+
+
+def _headline_finding(
+    *,
+    scope: str,
+    secret_count: int = 1,
+    confidence: str = "certain",
+) -> Finding:
+    return Finding(
+        path="/tmp/x",
+        kind="inline",
+        secret_names=["A"],
+        secret_count=secret_count,
+        reason="test",
+        scope=scope,
+        confidence=confidence,
+    )
+
+
+def test_scan_headline_all_project() -> None:
+    text = headline([_headline_finding(scope="project", secret_count=3)])
+    assert "3 secrets in this project" in text
+    assert "outside" not in text
+
+
+def test_scan_headline_all_deep() -> None:
+    text = headline([_headline_finding(scope="deep", secret_count=4)])
+    assert "4 secrets on this machine, outside this project" in text
+
+
+def test_scan_headline_mixed_here_plus_away() -> None:
+    findings = [
+        _headline_finding(scope="project", secret_count=2),
+        _headline_finding(scope="deep", secret_count=3),
+    ]
+    text = headline(findings)
+    assert "5 secrets on this machine — 2 in this project, 3 outside it" in text
+    assert leak_count(findings) == 5
+
+
+def test_scan_headline_empty() -> None:
+    text = headline([])
+    assert text.startswith("0 LEAKs found (--strict high)")
+    assert "0 secrets in this project" in text
+
+
+def test_format_human_report_project_root_only_for_project_scope(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "proj"
+    deep_only = format_human_report(
+        [_headline_finding(scope="deep", secret_count=1)],
+        project_root=root,
+    )
+    assert "Project root:" not in deep_only
+    mixed = format_human_report(
+        [
+            _headline_finding(scope="project", secret_count=1),
+            _headline_finding(scope="deep", secret_count=1),
+        ],
+        project_root=root,
+    )
+    assert f"Project root: {root}" in mixed
+    empty = format_human_report([], project_root=root)
+    assert "Project root:" not in empty
 
 
 def test_scan_deep_home_paths(ka_home, tmp_path, monkeypatch) -> None:
@@ -511,3 +582,56 @@ def test_iter_agent_transcript_files_globs(tmp_path, monkeypatch) -> None:
     assert paths["codex"].resolve() in found
     assert paths["copilot"].resolve() in found
     assert paths["claude_clean"].resolve() in found  # present on disk; clean has no LEAK
+
+
+def test_scan_deep_progress_on_stderr(
+    ka_home, project_dir, tmp_path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _install_transcript_home(home)
+
+    rc = main(["scan", "--deep", "--no-import", "--json"])
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert rc == 1
+    assert "agent transcripts" in captured.err
+    assert "API_KEY" not in captured.err
+    _assert_no_planted(captured.err)
+    assert data["headline"]
+
+
+def test_scan_deep_quiet_silences_progress(
+    ka_home, project_dir, tmp_path, monkeypatch, capsys
+) -> None:
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    _install_transcript_home(home)
+
+    rc = main(["scan", "--deep", "--no-import", "--json", "--quiet"])
+    captured = capsys.readouterr()
+    json.loads(captured.out)
+    assert rc == 1
+    assert captured.err == ""
+
+
+def test_scan_deep_intra_file_progress(
+    ka_home, project_dir, tmp_path, monkeypatch, capsys
+) -> None:
+    from key_amnesia.scan import _PROGRESS_LINE_EVERY
+
+    home = tmp_path / "fake-home"
+    claude = home / ".claude" / "projects" / "big"
+    claude.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    lines = ['{"text": "ok"}\n'] * (_PROGRESS_LINE_EVERY + 50)
+    (claude / "session.jsonl").write_text("".join(lines), encoding="utf-8")
+
+    rc = main(["scan", "--deep", "--no-import", "--json"])
+    captured = capsys.readouterr()
+    json.loads(captured.out)
+    assert rc == 0
+    assert str(_PROGRESS_LINE_EVERY) in captured.err
+    assert "session.jsonl" in captured.err

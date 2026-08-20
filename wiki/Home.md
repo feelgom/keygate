@@ -3,7 +3,7 @@
 Encrypted secret vault for AI coding agents. The agent can **use** secrets
 through `ka run` without ever **seeing** the values.
 
-> **Docs as of 0.4.10.** Pages in this tree describe the shipped CLI at that
+> **Docs as of 0.4.11.** Pages in this tree describe the shipped CLI at that
 > version. The live GitHub Wiki may lag until maintainers publish from
 > in-repo `wiki/` (see that directory’s `README.md` — publish instructions
 > only; not a wiki page).
@@ -28,11 +28,13 @@ Wrong forms that fail: `--as API_KEY`, `--as NAME`, `--as ENVVAR` (no `=`).
 Prefer `--cwd DIR` over `cd &&`.
 
 `ka scan` headline names the `--strict` gate (default `high`: **certain**
-vendor prefixes and confirmed filenames + **likely** assignments/UUID).
+vendor prefixes and confirmed filenames + **likely** assignments/UUID) and
+the location of those gated findings (project vs `--deep` hits outside it).
 **possible** hits (identifiers, passphrases, low-transition, unconfirmed
-`mcp.json`) always appear in the three-count summary; `--strict paranoid`
-gates on them (the ≤0.4.9 assignment gate). `--wide` aliases
-`--include-excluded` and does not imply `--deep`.
+`mcp.json`) always appear in the three-count summary; the three `--strict`
+gate totals print next. `--strict paranoid` gates on possible (the ≤0.4.9
+assignment gate). `--wide` aliases `--include-excluded` and does not imply
+`--deep`. `--deep` progress goes to stderr; `--quiet` suppresses it.
 
 `ka init` asks for the master password twice; if the entries do not match,
 nothing is created. **There is no recovery** if you forget that password.
