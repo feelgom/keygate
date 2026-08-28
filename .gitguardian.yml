@@ -1,0 +1,4 @@
+secret:
+  ignored-paths:
+    - "tests/**"
+    - "tests/fixtures/**"
