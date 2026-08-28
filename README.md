@@ -1,5 +1,7 @@
 # keygate
 
+> **Fork of [key-amnesia](https://github.com/fujitoid/key-amnesia)** — adds password manager backends (Bitwarden) so you don't need a separate encrypted vault.
+
 AI agents can **use** your secrets without **seeing** them.
 
 keygate connects to your password manager (Bitwarden), injects secrets into child processes as environment variables, and scrubs any leaked values from the output before the agent sees it.
@@ -127,14 +129,50 @@ This copies the keygate skill to `~/.claude/skills/keygate/` and registers the s
 - If an agent base64-encodes or character-splits a secret, scrubbing won't catch it (same limitation as key-amnesia)
 - Local cache is plaintext while unlocked — `kg lock` when not in use
 
-## Based on
+## Relationship to key-amnesia
 
-Forked from [key-amnesia](https://github.com/fujitoid/key-amnesia) with the following changes:
-- Added Bitwarden backend (no PyNaCl required)
-- Removed guard/admission system for PM backends (simpler session-file approach)
-- Rebranded CLI to `kg` / `keygate`
-- Local secret caching for instant `kg run` / `kg list`
+This project is a **fork of [key-amnesia](https://github.com/fujitoid/key-amnesia)** (Apache-2.0).
+
+### What keygate changes
+
+| Area | key-amnesia | keygate |
+|------|-------------|---------|
+| Secret storage | Own encrypted vault (Argon2id + SecretBox) | Bitwarden (via `bw` CLI) |
+| Dependencies | PyNaCl required | PyNaCl optional (only for local vault mode) |
+| Session model | Foreground guard process (blocking) | Session file (non-blocking) |
+| CLI command | `ka` | `kg` |
+| Speed | KDF on every unlock (~2s) | Cache after first load (instant `run`/`list`) |
+
+### What keygate preserves from upstream
+
+- `scrub.py` — output scrubbing engine (exact string replacement)
+- `run_exec.py` — subprocess execution + env injection + scrub
+- `hooks/secret_guard.py` — PreToolUse hook (credential detection + verb deny)
+- `detect.py` — secret pattern detection (high-entropy, vendor prefixes)
+- `setup_cmd.py` — agent skill/hook installer
+- Local vault mode (still works if you `pip install keygate[vault]`)
+
+### Syncing with upstream
+
+```bash
+# Track upstream
+git remote add upstream https://github.com/fujitoid/key-amnesia.git
+
+# Fetch and merge upstream updates
+git fetch upstream
+git merge upstream/master --no-edit
+
+# Our changes are isolated to:
+#   - src/key_amnesia/backend.py          (new)
+#   - src/key_amnesia/backend_bitwarden.py (new)
+#   - src/key_amnesia/cli.py              (backend dispatch at top of each cmd_*)
+#   - src/key_amnesia/config.py           (backend config key)
+#   - src/key_amnesia/paths.py            (KEYGATE_HOME env var)
+#   - src/key_amnesia/vault.py            (lazy crypto import)
+```
+
+Merge conflicts are minimal because keygate's additions are mostly in **new files** (`backend*.py`) and **early-return dispatches** at the top of existing command functions.
 
 ## License
 
-Apache-2.0
+Apache-2.0 (same as upstream key-amnesia)
