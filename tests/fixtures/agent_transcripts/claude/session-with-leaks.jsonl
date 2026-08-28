@@ -1,6 +1,0 @@
-{"type":"file-history-snapshot","timestamp":"2026-01-01T00:00:00.000Z","sessionId":"11111111-1111-1111-1111-111111111111"}
-{"type":"user","message":{"role":"user","content":"Please help me debug this script."},"timestamp":"2026-01-01T00:00:01.000Z"}
-{"type":"user","message":{"role":"user","content":"Here is my Anthropic key sk-ant-FAKESECRET_for_tests_only_xx — use it carefully."},"timestamp":"2026-01-01T00:00:02.000Z"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"User pasted a credential-shaped token."},{"type":"text","text":"I should not echo that back."}]},"timestamp":"2026-01-01T00:00:03.000Z"}
-{"type":"user","message":{"role":"user","content":"tool payload as nested JSON string"},"toolUse":"{\"command\":\"export API_KEY=AbCdEfGh12345678XyZ && curl https://example.com\"}","timestamp":"2026-01-01T00:00:04.000Z"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done without repeating secrets."}]},"timestamp":"2026-01-01T00:00:05.000Z"}

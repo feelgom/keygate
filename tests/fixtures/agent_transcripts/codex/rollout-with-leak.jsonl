@@ -1,2 +1,0 @@
-{"type":"message","role":"user","content":"Set OPENAI_API_KEY=sk-proj-NOTAREALKEY_but_long_enough_abc"}
-{"type":"message","role":"assistant","content":"I will not store that in cleartext."}
