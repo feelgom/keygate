@@ -13,11 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from key_amnesia import __version__
-from key_amnesia import crypto
 from key_amnesia import dotenv_import
 from key_amnesia import manifest as manifest_mod
 from key_amnesia.audit import audit_event
-from key_amnesia.config import ConfigError, load_config, set_config_value
+from key_amnesia.config import ConfigError, create_backend, get_backend, load_config, set_config_value
 from key_amnesia.paths import vault_path
 from key_amnesia.project import (
     VaultContext,
@@ -354,6 +353,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "session-timeout-minutes",
             "prompt-timeout-seconds",
             "pre-admit-seconds",
+            "backend",
         ],
     )
     p_cfg_set.add_argument("value")
@@ -641,7 +641,46 @@ def _yes_no(prompt: str) -> bool:
     return answer in {"y", "yes"}
 
 
+def _cmd_set_backend(args: argparse.Namespace, backend: Any) -> int:
+    """Store a secret via external backend."""
+    from key_amnesia.backend import BackendError
+
+    name = args.name
+    value = args.value
+    if not sys.stdin.isatty():
+        theme.error("Error: kg set requires an interactive terminal.")
+        return 1
+
+    # Reuse existing session if available
+    session = _load_bw_session()
+    if not session:
+        password = getpass.getpass("Bitwarden master password: ")
+        try:
+            session = backend.unlock(password)
+        except BackendError as e:
+            theme.error(f"Error: {e}")
+            return 1
+
+    if value is None:
+        value = getpass.getpass(f"Value for '{name}': ")
+    try:
+        backend.set_secret(session, name, value)
+    except BackendError as e:
+        theme.error(f"Error: {e}")
+        return 1
+    # Update local cache
+    cache = _load_secrets_cache() or {}
+    cache[name] = value
+    _save_secrets_cache(cache)
+    audit_event("set", secret_names=[name], route="inline", result="allowed")
+    theme.success(f"Set secret '{name}'.")
+    return 0
+
+
 def cmd_set(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        return _cmd_set_backend(args, backend)
     ctx = _ctx_from_args(args)
     name = args.name
     value = args.value
@@ -705,7 +744,30 @@ def cmd_set(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_remove_backend(args: argparse.Namespace, backend: Any) -> int:
+    """Remove a secret via external backend."""
+    from key_amnesia.backend import BackendError
+
+    name = args.name
+    if not sys.stdin.isatty():
+        theme.error("Error: ka remove requires an interactive terminal.")
+        return 1
+    password = getpass.getpass("Bitwarden master password: ")
+    try:
+        session = backend.unlock(password)
+        backend.remove_secret(session, name)
+    except BackendError as e:
+        theme.error(f"Error: {e}")
+        return 1
+    audit_event("remove", secret_names=[name], route="inline", result="allowed")
+    theme.success(f"Removed secret '{name}' from Bitwarden.")
+    return 0
+
+
 def cmd_remove(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        return _cmd_remove_backend(args, backend)
     ctx = _ctx_from_args(args)
     name = args.name
     request = PromptRequest(
@@ -1255,13 +1317,60 @@ _GUARD_RUN_HARD_STOP_CODES = frozenset(
 )
 
 
+def _cmd_run_backend(args: argparse.Namespace, backend: Any) -> int:
+    """Run a command with secrets from cache (no guard, no bw calls)."""
+    from key_amnesia.run_exec import run_with_secrets
+
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        theme.error("Usage: kg run --secret NAME [--as NAME=ENV] -- command...")
+        return 2
+
+    cwd_raw = getattr(args, "cwd", None)
+    run_cwd = str(Path(cwd_raw).expanduser().resolve()) if cwd_raw else os.getcwd()
+
+    inject_as = _parse_as_mappings(args.as_env)
+    secret_names = list(args.secret or [])
+    for n in inject_as:
+        if n not in secret_names:
+            secret_names.append(n)
+    if not secret_names:
+        theme.error("At least one --secret or --as is required.")
+        return 2
+
+    secrets = _load_secrets_cache()
+    if not secrets:
+        theme.error("Not unlocked. Run 'kg unlock' first.")
+        return 1
+
+    missing = [n for n in secret_names if n not in secrets]
+    if missing:
+        theme.error(f"Unknown secrets: {', '.join(missing)}")
+        return 1
+
+    env_inject = {inject_as.get(n, n): secrets[n] for n in secret_names}
+    by_name = {n: secrets[n] for n in secret_names}
+    result = run_with_secrets(cmd, env_inject, by_name, cwd=run_cwd)
+    audit_event(
+        "run", secret_names=secret_names, command=cmd, route="inline", result="allowed"
+    )
+    _write_command_output(sys.stdout, result.scrubbed_stdout)
+    _write_command_output(sys.stderr, result.scrubbed_stderr)
+    return result.exit_code
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        return _cmd_run_backend(args, backend)
     ctx = _ctx_from_args(args)
     cmd = list(args.cmd or [])
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        theme.error("Usage: key-amnesia run --secret NAME [--as NAME=ENV] -- command...")
+        theme.error("Usage: kg run --secret NAME [--as NAME=ENV] -- command...")
         return 2
 
     cwd_raw = getattr(args, "cwd", None)
@@ -1400,7 +1509,61 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 1
 
 
+def _load_bw_session() -> str | None:
+    """Load saved BW_SESSION from session file or env."""
+    from key_amnesia.paths import data_dir
+    session = os.environ.get("BW_SESSION", "")
+    if session:
+        return session
+    session_file = data_dir() / "bw_session"
+    if session_file.exists():
+        s = session_file.read_text().strip()
+        if s:
+            return s
+    return None
+
+
+def _load_secrets_cache() -> dict[str, str] | None:
+    """Load cached secrets from disk (written at unlock time)."""
+    from key_amnesia.paths import data_dir
+    cache_file = data_dir() / "secrets_cache.json"
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _save_secrets_cache(secrets: dict[str, str]) -> None:
+    """Save secrets to local cache (0600 permissions)."""
+    from key_amnesia.paths import data_dir
+    cache_file = data_dir() / "secrets_cache.json"
+    cache_file.write_text(json.dumps(secrets), encoding="utf-8")
+    os.chmod(cache_file, 0o600)
+
+
+def _clear_secrets_cache() -> None:
+    """Remove cached secrets."""
+    from key_amnesia.paths import data_dir
+    cache_file = data_dir() / "secrets_cache.json"
+    if cache_file.exists():
+        cache_file.unlink()
+
+
 def cmd_list(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        cache = _load_secrets_cache()
+        if cache is None:
+            theme.error("Not unlocked. Run 'kg unlock' first.")
+            return 1
+        for n in sorted(cache.keys()):
+            theme.out(n)
+        return 0
     ctx = _ctx_from_args(args)
     # Prefer live guard names if available; else sidecar (no prompt).
     from key_amnesia.guard import guard_is_alive, guard_request
@@ -1430,6 +1593,49 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_unlock_backend(args: argparse.Namespace, backend: Any) -> int:
+    """Unlock Bitwarden and save session for subsequent kg commands."""
+    from key_amnesia.backend import BackendError
+    from key_amnesia.paths import data_dir
+
+    session_file = data_dir() / "bw_session"
+
+    if session_file.exists():
+        existing = session_file.read_text().strip()
+        if existing:
+            try:
+                names = backend.list_names(existing)
+                theme.success(f"Already unlocked ({len(names)} secret(s) available).")
+                return 0
+            except BackendError:
+                pass
+
+    if not sys.stdin.isatty():
+        theme.error("Error: kg unlock requires an interactive terminal.")
+        return 1
+
+    password = getpass.getpass("Bitwarden master password: ")
+    try:
+        session = backend.unlock(password)
+    except BackendError as e:
+        theme.error(f"Error: {e}")
+        return 1
+
+    try:
+        secrets = backend.load_secrets(session)
+    except BackendError as e:
+        theme.error(f"Error: {e}")
+        return 1
+
+    session_file.write_text(session)
+    os.chmod(session_file, 0o600)
+    _save_secrets_cache(secrets)
+    theme.success(f"Unlocked. {len(secrets)} secret(s) cached locally.")
+    theme.info("Use 'kg list', 'kg run --secret NAME -- <cmd>'. Run 'kg lock' when done.")
+    audit_event("unlock", route="inline", result="allowed", reason="backend=bitwarden")
+    return 0
+
+
 def cmd_unlock(args: argparse.Namespace) -> int:
     """`ka unlock` *is* the guard: it decrypts, then blocks in this terminal.
 
@@ -1439,6 +1645,10 @@ def cmd_unlock(args: argparse.Namespace) -> int:
     (a separate console can't become this terminal's foreground guard).
     """
     from key_amnesia.guard import VaultSource, guard_is_alive, run_foreground_guard
+
+    backend = create_backend()
+    if backend is not None:
+        return _cmd_unlock_backend(args, backend)
 
     ctx = _ctx_from_args(args)
 
@@ -1535,6 +1745,23 @@ def cmd_unlock(args: argparse.Namespace) -> int:
 
 
 def cmd_lock(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        from key_amnesia.backend import BackendError
+        from key_amnesia.paths import data_dir
+        session_file = data_dir() / "bw_session"
+        session = _load_bw_session()
+        if session:
+            try:
+                backend.lock(session)
+            except BackendError:
+                pass
+        if session_file.exists():
+            session_file.unlink()
+        _clear_secrets_cache()
+        theme.success("Locked. Session and cache cleared.")
+        return 0
+
     from key_amnesia.guard import (
         clear_guard_lock,
         format_no_guard_message,
@@ -1700,6 +1927,25 @@ def _format_remaining(expires_at_epoch: Any) -> str | None:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    backend = create_backend()
+    if backend is not None:
+        from key_amnesia.backend import BackendError
+        session = _load_bw_session()
+        if not session:
+            theme.out("status: locked")
+            theme.info("Run 'kg unlock' to start a session.")
+            return 0
+        try:
+            names = backend.list_names(session)
+            theme.out("status: unlocked")
+            theme.out(f"backend: bitwarden")
+            theme.out(f"secrets: {len(names)}")
+            return 0
+        except BackendError:
+            theme.out("status: session expired")
+            theme.info("Run 'kg unlock' again.")
+            return 0
+
     from key_amnesia.guard import (
         format_no_guard_message,
         guard_is_alive,
@@ -1813,6 +2059,7 @@ def cmd_passwd(args: argparse.Namespace) -> int:
         )
         return 1
 
+    from key_amnesia import crypto
     save_vault(vp, new_password, payload, salt=crypto.generate_salt())
     audit_event("passwd", route="inline", result="allowed")
     theme.success("Master password changed.")

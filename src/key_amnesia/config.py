@@ -15,9 +15,28 @@ DEFAULTS: dict[str, Any] = {
     # Default window for `ka unlock --pre-admit` (no `--pre-admit-seconds`
     # flag exists; this is the only knob) — see guard.run_foreground_guard.
     "pre-admit-seconds": 900,
+    # Backend: "vault" (default, local encrypted file) or "bitwarden"
+    "backend": "vault",
 }
 
+VALID_BACKENDS = frozenset({"vault", "bitwarden"})
+
 VALID_SESSION_MODES = frozenset({"per-call", "cached"})
+
+
+def get_backend() -> str:
+    """Return the configured backend name."""
+    cfg = load_config()
+    return str(cfg.get("backend", "vault"))
+
+
+def create_backend() -> "SecretBackend | None":
+    """Instantiate the configured backend, or None for the default vault backend."""
+    backend_name = get_backend()
+    if backend_name == "bitwarden":
+        from key_amnesia.backend_bitwarden import BitwardenBackend
+        return BitwardenBackend()
+    return None
 
 
 class ConfigError(Exception):
@@ -76,11 +95,17 @@ def set_config_value(key: str, value: str, path: Path | None = None) -> dict[str
         if seconds < 1:
             raise ConfigError("pre-admit-seconds must be >= 1")
         cfg[key] = seconds
+    elif key == "backend":
+        if value not in VALID_BACKENDS:
+            raise ConfigError(
+                f"Invalid backend {value!r}; expected one of {sorted(VALID_BACKENDS)}"
+            )
+        cfg[key] = value
     else:
         raise ConfigError(
             f"Unknown config key {key!r}; "
             "supported: session-mode, session-timeout-minutes, "
-            "prompt-timeout-seconds, pre-admit-seconds"
+            "prompt-timeout-seconds, pre-admit-seconds, backend"
         )
     save_config(cfg, path)
     return cfg

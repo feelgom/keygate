@@ -42,7 +42,9 @@ from key_amnesia.ka_policy import (
     ka_verb_deny_reason,
 )
 
-DISABLE_ENV = "KEY_AMNESIA_HOOK_DISABLE"
+DISABLE_ENV = "KEYGATE_HOOK_DISABLE"
+# Back-compat
+_DISABLE_ENV_LEGACY = "KEY_AMNESIA_HOOK_DISABLE"
 
 # Already routing secrets through key-amnesia — do not nag.
 _KA_SAFE = re.compile(
@@ -149,7 +151,7 @@ _ALLOWED_TOOL_NAMES = {"bash", "shell", "powershell", "write", "edit", "multiedi
 
 
 def main() -> int:
-    if os.environ.get(DISABLE_ENV):
+    if os.environ.get(DISABLE_ENV) or os.environ.get(_DISABLE_ENV_LEGACY):
         return 0
 
     try:

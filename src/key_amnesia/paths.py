@@ -7,17 +7,20 @@ import stat
 from pathlib import Path
 
 
-ENV_HOME = "KEY_AMNESIA_HOME"
-ENV_VAULT_PATH = "KEY_AMNESIA_VAULT_PATH"
+ENV_HOME = "KEYGATE_HOME"
+ENV_VAULT_PATH = "KEYGATE_VAULT_PATH"
+# Back-compat: honor old env vars if new ones aren't set
+_ENV_HOME_LEGACY = "KEY_AMNESIA_HOME"
+_ENV_VAULT_LEGACY = "KEY_AMNESIA_VAULT_PATH"
 
 
 def data_dir() -> Path:
-    """Return the key-amnesia data directory, creating it with restrictive perms."""
-    override = os.environ.get(ENV_HOME)
+    """Return the keygate data directory, creating it with restrictive perms."""
+    override = os.environ.get(ENV_HOME) or os.environ.get(_ENV_HOME_LEGACY)
     if override:
         root = Path(override)
     else:
-        root = Path.home() / ".key-amnesia"
+        root = Path.home() / ".keygate"
     root.mkdir(parents=True, exist_ok=True)
     try:
         root.chmod(0o700)
@@ -28,7 +31,7 @@ def data_dir() -> Path:
 
 
 def vault_path() -> Path:
-    override = os.environ.get(ENV_VAULT_PATH)
+    override = os.environ.get(ENV_VAULT_PATH) or os.environ.get(_ENV_VAULT_LEGACY)
     if override:
         return Path(override)
     return data_dir() / "vault.bin"

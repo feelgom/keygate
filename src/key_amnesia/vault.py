@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from key_amnesia import crypto
 from key_amnesia import theme
 from key_amnesia.paths import names_path, vault_path
 
@@ -104,6 +103,7 @@ def _read_header(data: bytes) -> tuple[bytes, int, bytes, int, int, bytes]:
 
 
 def _decrypt_outer(key: bytes, blob: bytes) -> dict[str, Any]:
+    from key_amnesia import crypto
     try:
         plaintext = crypto.decrypt(key, blob)
     except crypto.CryptoError_ as e:
@@ -151,6 +151,7 @@ def load_vault_with_key(path: Path | str | None, password: str) -> tuple[dict[st
     Returned payload always exposes ``secrets`` as plaintext name→value for
     password holders (KAM2 unwraps via admin_box_sk inside the outer AEAD).
     """
+    from key_amnesia import crypto
     p = Path(path) if path is not None else vault_path()
     if not p.exists():
         raise VaultError(f"Vault not found: {p}")
@@ -220,6 +221,7 @@ def save_vault(
     If ``payload`` carries ``kam2`` metadata, writes **KAM2** (per-secret wraps).
     Otherwise writes **KAM1**. Users who never enable roles stay on KAM1.
     """
+    from key_amnesia import crypto
     p = Path(path) if path is not None else vault_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     if salt is None:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from key_amnesia import theme
 
-SKILL_NAMES = ["key-amnesia-usage", "key-amnesia-hygiene", "key-amnesia-migrate"]
+SKILL_NAMES = ["key-amnesia-usage", "key-amnesia-hygiene", "key-amnesia-migrate", "keygate-usage"]
 
 CLAUDE_MATCHER = "Bash|Write|Edit"
 CURSOR_MATCHER = "Shell|Write"
