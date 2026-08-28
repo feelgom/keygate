@@ -1,0 +1,440 @@
+"""PreToolUse/preToolUse secret-guard hook: detection + host deny contracts."""
+
+from __future__ import annotations
+
+import io
+import json
+
+import pytest
+
+from key_amnesia.hooks import secret_guard as sg
+
+
+# --- true positives: known prefixes -----------------------------------------
+
+KNOWN_PREFIX_SAMPLES = [
+    ("sk-" + "a" * 25, "OpenAI-style key"),
+    ("sk-ant-" + "a" * 25, "Anthropic-style key"),
+    ("AKIA" + "0" * 16, "AWS access key id"),
+    ("ghp_" + "a" * 25, "GitHub PAT"),
+    ("github_pat_" + "a" * 25, "GitHub fine-grained PAT"),
+    ("glpat-" + "a" * 25, "GitLab PAT"),
+    ("xoxb-" + "a" * 25, "Slack token"),
+    ("AIza" + "a" * 25, "Google API key"),
+    ("sk_live_" + "a" * 25, "Stripe secret key"),
+    ("rk_live_" + "a" * 25, "Stripe restricted key"),
+    ("npm_" + "a" * 25, "npm token"),
+]
+
+
+@pytest.mark.parametrize("token,expected_kind", KNOWN_PREFIX_SAMPLES)
+def test_known_prefixes_block(token: str, expected_kind: str) -> None:
+    text = f"curl -H 'Authorization: {token}' https://example.com"
+    assert sg.find_finding(text) == expected_kind
+
+
+def test_bearer_token_blocks() -> None:
+    text = "curl -H 'Authorization: Bearer abcdEFGH12345678ijkl' https://example.com"
+    assert sg.find_finding(text) == "Bearer token"
+
+
+def test_high_entropy_assignment_blocks() -> None:
+    text = "export API_KEY=aB3xQ9mK2pL7vN4wZ8"
+    finding = sg.find_finding(text)
+    assert finding is not None
+    assert "assignment" in finding
+
+
+def test_high_entropy_assignment_blocks_quoted() -> None:
+    text = 'TOKEN="Zk9pL2xQ7mN4vB8w"'
+    assert sg.find_finding(text) is not None
+
+
+# --- false positives (advisory-safe / must not block) -----------------------
+
+
+def test_password_placeholder_allowed() -> None:
+    assert sg.find_finding("PASSWORD=test123") is None
+
+
+def test_bare_api_key_mention_allowed() -> None:
+    assert sg.find_finding("echo API_KEY is required") is None
+
+
+def test_comment_mentioning_secret_allowed() -> None:
+    assert sg.find_finding("# this function handles the secret rotation") is None
+
+
+def test_changeme_placeholder_allowed() -> None:
+    assert sg.find_finding("TOKEN=changeme") is None
+
+
+def test_ka_run_command_allowed_even_with_secret_name() -> None:
+    text = "ka run --secret API_KEY --as API_KEY=API_KEY -- python app.py"
+    assert sg.find_finding(text) is None
+
+
+def test_ka_set_command_allowed() -> None:
+    assert sg.find_finding("ka set OPENAI_API_KEY") is None
+
+
+def test_empty_text_allowed() -> None:
+    assert sg.find_finding("") is None
+
+
+# --- host detection + deny shapes -------------------------------------------
+
+
+def test_detect_host_claude_default() -> None:
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
+    assert sg.detect_host(payload) == "claude"
+
+
+def test_detect_host_cursor_by_event_name() -> None:
+    payload = {"hook_event_name": "preToolUse", "tool_name": "Shell", "tool_input": {}}
+    assert sg.detect_host(payload) == "cursor"
+
+
+def test_detect_host_cursor_by_unique_fields() -> None:
+    payload = {
+        "conversation_id": "abc",
+        "cursor_version": "1.7.2",
+        "tool_name": "Shell",
+        "tool_input": {},
+    }
+    assert sg.detect_host(payload) == "cursor"
+
+
+def test_deny_claude_shape() -> None:
+    reply = sg.deny_claude("OpenAI-style key")
+    hso = reply["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse"
+    assert hso["permissionDecision"] == "deny"
+    assert "ka set" in hso["permissionDecisionReason"]
+    assert "ka run" in hso["permissionDecisionReason"]
+
+
+def test_deny_cursor_shape() -> None:
+    reply = sg.deny_cursor("OpenAI-style key")
+    assert reply["permission"] == "deny"
+    assert "agent_message" in reply
+    assert "user_message" in reply
+    assert "ka set" in reply["agent_message"] or "ka run" in reply["agent_message"]
+
+
+# --- main() end-to-end (stdin JSON -> stdout JSON) --------------------------
+
+
+def _run_main(payload: dict, monkeypatch: pytest.MonkeyPatch, capsys) -> tuple[int, dict | None]:
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    rc = sg.main()
+    out = capsys.readouterr().out.strip()
+    return rc, (json.loads(out) if out else None)
+
+
+def test_main_claude_bash_blocks(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "export TOKEN=" + "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_cursor_shell_blocks(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "preToolUse",
+        "cursor_version": "1.7.2",
+        "conversation_id": "abc",
+        "tool_name": "Shell",
+        "tool_input": {"command": "export TOKEN=" + "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["permission"] == "deny"
+
+
+def test_main_write_tool_scans_contents(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": "x.env", "contents": "AKIA" + "0" * 16},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+
+
+def test_main_codex_apply_patch_blocks_claude_shape(monkeypatch, capsys) -> None:
+    """Codex apply_patch uses Claude-shaped PreToolUse deny."""
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Update File: .env\n+" + "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_main_clean_command_allows(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo hello world"},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_main_ignores_unmatched_tool(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"command": "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_main_disable_env_skips_everything(monkeypatch, capsys) -> None:
+    monkeypatch.setenv(sg.DISABLE_ENV, "1")
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "export TOKEN=" + "sk-" + "a" * 25},
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_main_fails_open_on_malformed_json(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("not json{{{"))
+    rc = sg.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == ""
+
+
+def test_main_fails_open_on_empty_stdin(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    rc = sg.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == ""
+
+
+def test_main_fails_open_on_non_dict_json(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(["not", "a", "dict"])))
+    rc = sg.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == ""
+
+
+# --- verb deny (load-bearing) ------------------------------------------------
+
+
+DENY_SHELL_SAMPLES = [
+    "ka set FOO bar",
+    "ka remove FOO",
+    "ka import .env",
+    "ka passwd",
+    "ka init",
+    "ka unlock",
+    "ka grant FOO --to bob",
+    "ka revoke FOO --to bob",
+    "ka member add bob --pubkey x --role runner",
+    "ka member remove bob",
+    "ka config set session-mode cached",
+    "ka reveal FOO",
+    "ka export FOO",
+    "ka copy FOO",
+    "ka setup",
+    "ka identity create",
+    "ka scan --yes",
+]
+
+
+def _claude_payload(command: str, tool_name: str = "Bash") -> dict:
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"command": command},
+    }
+
+
+def _codex_payload(command: str, tool_name: str = "Bash") -> dict:
+    # Codex-like: Claude PreToolUse shape, no Cursor markers.
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"command": command},
+    }
+
+
+def _cursor_payload(command: str) -> dict:
+    return {
+        "hook_event_name": "preToolUse",
+        "cursor_version": "1.7.2",
+        "conversation_id": "abc",
+        "tool_name": "Shell",
+        "tool_input": {"command": command},
+    }
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_claude_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_claude_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "own terminal" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_codex_like_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_codex_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert "permission" not in reply
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("command", DENY_SHELL_SAMPLES)
+def test_verb_deny_cursor_shape(command: str, monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_cursor_payload(command), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["permission"] == "deny"
+    assert "hookSpecificOutput" not in reply
+    assert "own terminal" in reply["agent_message"]
+
+
+def test_write_tool_does_not_verb_deny_ka_set(monkeypatch, capsys) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "README.md",
+            "contents": "Store secrets with `ka set NAME` in your own terminal.",
+        },
+    }
+    rc, reply = _run_main(payload, monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_ka_safe_does_not_suppress_verb_deny(monkeypatch, capsys) -> None:
+    """_KA_SAFE matches `ka set` but verb deny still fires."""
+    rc, reply = _run_main(_claude_payload("ka set API_KEY sk-ant-" + "a" * 25), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "ka set" in reason
+    assert "own terminal" in reason
+
+
+def test_nested_run_set_denied(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret N --as N=E -- ka set FOO bar"),
+        monkeypatch,
+        capsys,
+    )
+    assert reply is not None
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "wrapping" in reason
+    assert "ka set" in reason
+
+
+def test_chained_secret_after_ka_run_denied(monkeypatch, capsys) -> None:
+    token = "sk-ant-" + "a" * 25
+    cmd = (
+        "ka run --secret X --as X=V -- python a.py && "
+        f'curl -H "Authorization: Bearer {token}"'
+    )
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = reply["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "Anthropic" in reason or "Bearer" in reason
+
+
+def test_pipe_tail_after_ka_run_no_finding(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret X --as X=V -- python a.py | tail -30"
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_nested_run_python_allowed(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(
+        _claude_payload("ka run --secret N --as N=E -- python script.py"),
+        monkeypatch,
+        capsys,
+    )
+    assert rc == 0
+    assert reply is None
+
+
+def test_trailing_secret_after_run_denied(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret N --as N=E -- python deploy.py --api-key " + "sk-ant-" + "a" * 25
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is not None
+    assert reply["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "Anthropic" in reply["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_ordinary_ka_run_no_trailing_finding(monkeypatch, capsys) -> None:
+    cmd = "ka run --secret NAME --as NAME=VAR -- python script.py"
+    rc, reply = _run_main(_claude_payload(cmd), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_ka_scan_without_yes_allowed(monkeypatch, capsys) -> None:
+    rc, reply = _run_main(_claude_payload("ka scan --deep --no-import"), monkeypatch, capsys)
+    assert rc == 0
+    assert reply is None
+
+
+def test_find_finding_ka_safe_skips_prefix_but_trailing_scan_does_not() -> None:
+    prefix = "ka run --secret NAME --as NAME=VAR -- python script.py"
+    assert sg.find_finding(prefix) is None
+    trailing = "python deploy.py --api-key " + "sk-ant-" + "a" * 25
+    assert sg.find_finding(prefix + " " + trailing) is None  # _KA_SAFE on full text
+    assert sg.find_finding(trailing, ignore_ka_safe=True) is not None
+
+
+def test_function_call_assignment_allowed() -> None:
+    assert sg.find_finding("token = secrets.token_hex(8)") is None
+    assert sg.find_finding("new_token = secrets_mod.token_urlsafe(32)") is None
+    assert sg.find_finding("Token = GetTokenFromCache()") is None
+
+
+def test_type_annotation_allowed() -> None:
+    assert sg.find_finding("token: Optional[str]") is None
+
+
+def test_json_quoted_key_likely_denied() -> None:
+    text = '{"api_key": "aB3xQ9mK2pL7vN4wZ8"}'
+    finding = sg.find_finding(text)
+    assert finding is not None
+    assert "assignment" in finding
+
+
+def test_passphrase_still_hook_denied() -> None:
+    assert sg.find_finding("export PASSWORD=CorrectHorseBattery") is not None
+    assert sg.find_finding("secret = CorrectHorseBattery") is not None
+
