@@ -18,13 +18,13 @@ keygate connects to your password manager (Bitwarden), injects secrets into chil
 ## Install
 
 ```bash
-git clone https://github.com/feelgom/keygate.git
-cd keygate
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+# One-line install (pipx, pip, or venv — auto-detected)
+curl -sSL https://raw.githubusercontent.com/feelgom/keygate/master/install-global.sh | bash
+```
 
-# Add to PATH
-ln -sf $(pwd)/.venv/bin/kg ~/bin/kg
+Or with pipx directly:
+```bash
+pipx install git+https://github.com/feelgom/keygate.git
 ```
 
 ### Prerequisites
