@@ -18,13 +18,12 @@ keygate connects to your password manager (Bitwarden), injects secrets into chil
 ## Install
 
 ```bash
-# One-line install (pipx, pip, or venv — auto-detected)
-curl -sSL https://raw.githubusercontent.com/feelgom/keygate/master/install-global.sh | bash
+pip install keygate-cli
 ```
 
-Or with pipx directly:
+Or with pipx (isolated environment):
 ```bash
-pipx install git+https://github.com/feelgom/keygate.git
+pipx install keygate-cli
 ```
 
 ### Prerequisites

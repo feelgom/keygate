@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "key-amnesia"
-version = "0.5.0-dev"
-description = "Secret vault for AI agents with password manager backends (Bitwarden, 1Password) — a drop-in .env replacement"
+name = "keygate-cli"
+version = "0.1.0"
+description = "AI agents use your secrets without seeing them — Bitwarden-backed secret injection + output scrubbing"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "key-amnesia contributors" }]
-keywords = ["secrets", "credentials", "vault", "ai-agents", "claude", "cursor", "codex", "security"]
+authors = [{ name = "feelgom" }]
+keywords = ["secrets", "credentials", "bitwarden", "ai-agents", "claude", "cursor", "codex", "security", "key-amnesia"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -37,11 +37,10 @@ vault = ["pynacl>=1.5"]
 dev = ["pytest>=7.0"]
 
 [project.urls]
-Homepage = "https://github.com/fujitoid/key-amnesia"
-Documentation = "https://github.com/fujitoid/key-amnesia/wiki"
-Repository = "https://github.com/fujitoid/key-amnesia"
-Issues = "https://github.com/fujitoid/key-amnesia/issues"
-Funding = "https://www.buymeacoffee.com/fujitoid"
+Homepage = "https://github.com/feelgom/keygate"
+Repository = "https://github.com/feelgom/keygate"
+Issues = "https://github.com/feelgom/keygate/issues"
+Upstream = "https://github.com/fujitoid/key-amnesia"
 
 [project.scripts]
 keygate = "key_amnesia.cli:main"
